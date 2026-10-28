@@ -5,23 +5,25 @@ import 'package:shelf/shelf_io.dart';
 import 'package:shelf_router/shelf_router.dart';
 import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
 
-// 1. Creamos un filtro (Middleware) para darle permiso a los navegadores (CORS)
+// Importamos nuestra nueva base de datos
+import 'package:servidor_jueguito/base_datos.dart';
+
+const String secretoJWT = 'mi_super_secreto_jueguito_7x7';
+
+// Instanciamos la base de datos globalmente para que las rutas la usen
+final db = BaseDatos();
+
 Middleware permisosCors() {
   return (Handler manejadorInterno) {
     return (Request request) async {
-      // Los navegadores primero envían una petición 'OPTIONS' invisible para pedir permiso
       if (request.method == 'OPTIONS') {
         return Response.ok('', headers: {
-          'Access-Control-Allow-Origin': '*', // Permitir cualquier origen
+          'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
           'Access-Control-Allow-Headers': 'Origin, Content-Type, Authorization',
         });
       }
-
-      // Procesamos la petición normal (ej. el POST a /login)
       final response = await manejadorInterno(request);
-
-      // Le pegamos los permisos a la respuesta final
       return response.change(headers: {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
@@ -31,43 +33,80 @@ Middleware permisosCors() {
   };
 }
 
-// Esta es nuestra "llave maestra". Con esto el servidor encripta y desencripta.
-// En un futuro la sacaremos de aquí por seguridad, pero por ahora está bien.
-const String secretoJWT = 'mi_super_secreto_jueguito_7x7';
-
 void main(List<String> args) async {
+  // Inicializamos SQLite antes de arrancar el servidor
+  db.inicializar();
+
   final router = Router();
 
-  // Ruta de prueba para generar un Token (Simulando un Login exitoso)
-  router.post('/login', (Request request) async {
-    
-    // Aquí (más adelante) validaremos en base de datos.
-    // Por ahora, si alguien llama a esta ruta, le creamos su token:
-    final jwt = JWT({
-      'id_jugador': 'jugador_001',
-      'nombre': 'Adán',
-      'rol': 'usuario'
-    });
+  // 1. RUTA DE REGISTRO
+  router.post('/registro', (Request request) async {
+    try {
+      // Leemos los datos que nos mandó Flutter
+      final cuerpo = await request.readAsString();
+      final datos = jsonDecode(cuerpo);
+      final usuario = datos['usuario'];
+      final password = datos['password'];
 
-    // Firmamos el token con nuestro secreto
-    final token = jwt.sign(SecretKey(secretoJWT));
+      if (usuario == null || password == null || usuario.isEmpty || password.isEmpty) {
+        return Response.badRequest(body: jsonEncode({'error': 'Faltan datos'}));
+      }
 
-    // Respondemos con el token en formato JSON
-    return Response.ok(
-      jsonEncode({
-        'mensaje': 'Login exitoso', 
-        'token': token
-      }),
-      headers: {'Content-Type': 'application/json'},
-    );
+      // Intentamos guardarlo en SQLite
+      bool exito = db.registrarUsuario(usuario, password);
+
+      if (exito) {
+        return Response.ok(jsonEncode({'mensaje': 'Usuario creado exitosamente'}));
+      } else {
+        // Código 409: Conflicto (el usuario ya existe)
+        return Response(409, body: jsonEncode({'error': 'El nombre de usuario ya está en uso'}));
+      }
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': 'Error interno del servidor'}));
+    }
   });
 
-  // Configuramos el servidor para que escuche en nuestra máquina local
+  // 2. RUTA DE LOGIN ACTUALIZADA
+  router.post('/login', (Request request) async {
+    try {
+      final cuerpo = await request.readAsString();
+      final datos = jsonDecode(cuerpo);
+      final usuario = datos['usuario'];
+      final password = datos['password'];
+
+      // Validamos contra SQLite
+      final usuarioDb = db.validarLogin(usuario, password);
+
+      if (usuarioDb != null) {
+        // Si las credenciales son correctas, generamos su Token
+        final jwt = JWT({
+          'id_jugador': usuarioDb['id'],
+          'nombre': usuarioDb['usuario'],
+          'rol': 'jugador'
+        });
+
+        final token = jwt.sign(SecretKey(secretoJWT));
+
+        return Response.ok(
+          jsonEncode({'mensaje': 'Login exitoso', 'token': token}),
+          headers: {'Content-Type': 'application/json'},
+        );
+      } else {
+        // Código 401: No autorizado (credenciales incorrectas)
+        return Response(401, body: jsonEncode({'error': 'Usuario o contraseña incorrectos'}));
+      }
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': 'Error interno del servidor'}));
+    }
+  });
+
   final ip = InternetAddress.anyIPv4;
   final port = int.parse(Platform.environment['PORT'] ?? '8080');
   
-  // Pipeline: Es como un filtro por donde pasan todas las peticiones (aquí solo imprimimos un log en consola)
-  final handler = Pipeline().addMiddleware(permisosCors()).addMiddleware(logRequests()).addHandler(router.call);
+  final handler = Pipeline()
+      .addMiddleware(permisosCors())
+      .addMiddleware(logRequests())
+      .addHandler(router.call);
 
   final server = await serve(handler, ip, port);
   print('Servidor de Jueguito corriendo en http://${server.address.host}:${server.port}');
