@@ -5,6 +5,32 @@ import 'package:shelf/shelf_io.dart';
 import 'package:shelf_router/shelf_router.dart';
 import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
 
+// 1. Creamos un filtro (Middleware) para darle permiso a los navegadores (CORS)
+Middleware permisosCors() {
+  return (Handler manejadorInterno) {
+    return (Request request) async {
+      // Los navegadores primero envían una petición 'OPTIONS' invisible para pedir permiso
+      if (request.method == 'OPTIONS') {
+        return Response.ok('', headers: {
+          'Access-Control-Allow-Origin': '*', // Permitir cualquier origen
+          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+          'Access-Control-Allow-Headers': 'Origin, Content-Type, Authorization',
+        });
+      }
+
+      // Procesamos la petición normal (ej. el POST a /login)
+      final response = await manejadorInterno(request);
+
+      // Le pegamos los permisos a la respuesta final
+      return response.change(headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Origin, Content-Type, Authorization',
+      });
+    };
+  };
+}
+
 // Esta es nuestra "llave maestra". Con esto el servidor encripta y desencripta.
 // En un futuro la sacaremos de aquí por seguridad, pero por ahora está bien.
 const String secretoJWT = 'mi_super_secreto_jueguito_7x7';
@@ -41,7 +67,7 @@ void main(List<String> args) async {
   final port = int.parse(Platform.environment['PORT'] ?? '8080');
   
   // Pipeline: Es como un filtro por donde pasan todas las peticiones (aquí solo imprimimos un log en consola)
-  final handler = Pipeline().addMiddleware(logRequests()).addHandler(router.call);
+  final handler = Pipeline().addMiddleware(permisosCors()).addMiddleware(logRequests()).addHandler(router.call);
 
   final server = await serve(handler, ip, port);
   print('Servidor de Jueguito corriendo en http://${server.address.host}:${server.port}');
