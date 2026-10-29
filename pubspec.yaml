@@ -12,6 +12,7 @@ dependencies:
   dart_jsonwebtoken: ^3.0.0
   sqlite3: ^2.9.4
   crypto: ^3.0.8
+  bcrypt: ^1.2.0
 
 dev_dependencies:
   http: ^1.2.2
