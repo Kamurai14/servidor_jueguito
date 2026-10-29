@@ -85,7 +85,8 @@ void main(List<String> args) async {
           'rol': 'jugador'
         });
 
-        final token = jwt.sign(SecretKey(secretoJWT));
+        // Firmamos el token y le damos 7 días de vida
+        final token = jwt.sign(SecretKey(secretoJWT),expiresIn: const Duration(days: 7),);
 
         return Response.ok(
           jsonEncode({'mensaje': 'Login exitoso', 'token': token}),
