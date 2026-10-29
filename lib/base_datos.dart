@@ -55,4 +55,17 @@ class BaseDatos {
     }
     return null; 
   }
+
+  // Elimina un usuario de la base de datos a partir de su nombre
+  bool borrarUsuario(String usuario) {
+    try {
+      final stmt = _db.prepare('DELETE FROM usuarios WHERE usuario = ?');
+      stmt.execute([usuario]);
+      stmt.dispose();
+      return true;
+    } catch (e) {
+      print('Error al borrar usuario: $e');
+      return false;
+    }
+  }
 }

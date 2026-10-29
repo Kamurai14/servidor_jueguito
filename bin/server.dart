@@ -100,6 +100,43 @@ void main(List<String> args) async {
     }
   });
 
+  // 3. RUTA PARA BORRAR CUENTA
+  router.delete('/borrar-cuenta', (Request request) async {
+    try {
+      // 1. Verificamos que traiga el token en los headers
+      final authHeader = request.headers['authorization'];
+      if (authHeader == null || !authHeader.startsWith('Bearer ')) {
+        return Response.forbidden(jsonEncode({'error': 'Acceso denegado: Token no proporcionado'}));
+      }
+
+      // 2. Extraemos el token (quitando "Bearer ")
+      final token = authHeader.substring(7);
+
+      // 3. Desencriptamos usando tu llave secreta
+      final jwt = JWT.verify(token, SecretKey(secretoJWT));
+      
+      // 4. Obtenemos el nombre. En tu login usaste la llave 'nombre' para el payload
+      final nombreUsuario = jwt.payload['nombre'];
+
+      // 5. Lo eliminamos de SQLite
+      bool exito = db.borrarUsuario(nombreUsuario);
+
+      if (exito) {
+        return Response.ok(
+          jsonEncode({'mensaje': 'Cuenta eliminada exitosamente'}),
+          headers: {'Content-Type': 'application/json'},
+        );
+      } else {
+        return Response.internalServerError(
+          body: jsonEncode({'error': 'Error al eliminar el usuario en la base de datos'})
+        );
+      }
+    } catch (e) {
+      // Si el JWT.verify falla (token alterado o expirado), cae aquí
+      return Response.forbidden(jsonEncode({'error': 'Token inválido o expirado'}));
+    }
+  });
+
   final ip = InternetAddress.anyIPv4;
   final port = int.parse(Platform.environment['PORT'] ?? '8080');
   
