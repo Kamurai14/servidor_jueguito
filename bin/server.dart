@@ -13,6 +13,10 @@ const String secretoJWT = 'mi_super_secreto_jueguito_7x7';
 // Instanciamos la base de datos globalmente para que las rutas la usen
 final db = BaseDatos();
 
+// --- SISTEMA ANTI FUERZA BRUTA ---
+final Map<String, int> intentosFallidos = {};
+final Map<String, DateTime> cuentasBloqueadas = {};
+
 Middleware permisosCors() {
   return (Handler manejadorInterno) {
     return (Request request) async {
@@ -74,27 +78,60 @@ void main(List<String> args) async {
       final usuario = datos['usuario'];
       final password = datos['password'];
 
-      // Validamos contra SQLite
+      // 1. TRAMPA ANTI-HACKERS: ¿El usuario está en la lista negra temporal?
+      if (cuentasBloqueadas.containsKey(usuario)) {
+        final tiempoDesbloqueo = cuentasBloqueadas[usuario]!;
+        if (DateTime.now().isBefore(tiempoDesbloqueo)) {
+          // Sigue bloqueado, lo pateamos sin siquiera consultar la base de datos
+          return Response.forbidden(jsonEncode({
+            'error': 'Demasiados intentos fallidos. Intenta de nuevo en 15 minutos.'
+          }));
+        } else {
+          // Ya cumplió su castigo de 15 minutos, lo perdonamos
+          cuentasBloqueadas.remove(usuario);
+          intentosFallidos.remove(usuario);
+        }
+      }
+
+      // 2. Intentamos el login normal en SQLite
       final usuarioDb = db.validarLogin(usuario, password);
 
       if (usuarioDb != null) {
-        // Si las credenciales son correctas, generamos su Token
+        // ÉXITO: Borramos su historial de fallos si tenía alguno
+        intentosFallidos.remove(usuario);
+
         final jwt = JWT({
           'id_jugador': usuarioDb['id'],
           'nombre': usuarioDb['usuario'],
           'rol': 'jugador'
         });
 
-        // Firmamos el token y le damos 7 días de vida
-        final token = jwt.sign(SecretKey(secretoJWT),expiresIn: const Duration(days: 7),);
+        final token = jwt.sign(
+          SecretKey(secretoJWT),
+          expiresIn: const Duration(days: 7),
+        );
 
         return Response.ok(
           jsonEncode({'mensaje': 'Login exitoso', 'token': token}),
           headers: {'Content-Type': 'application/json'},
         );
       } else {
-        // Código 401: No autorizado (credenciales incorrectas)
-        return Response(401, body: jsonEncode({'error': 'Usuario o contraseña incorrectos'}));
+        // FALLO: Anotamos un error en su historial
+        intentosFallidos[usuario] = (intentosFallidos[usuario] ?? 0) + 1;
+
+        // Si llegó a 5 errores, lo mandamos a la lista negra por 15 minutos
+        if (intentosFallidos[usuario]! >= 5) {
+          cuentasBloqueadas[usuario] = DateTime.now().add(const Duration(minutes: 15));
+          return Response.forbidden(jsonEncode({
+            'error': 'Has fallado 5 veces. Cuenta bloqueada por seguridad durante 15 minutos.'
+          }));
+        }
+
+        // Si falló pero aún le quedan intentos:
+        final intentosRestantes = 5 - intentosFallidos[usuario]!;
+        return Response(401, body: jsonEncode({
+          'error': 'Usuario o contraseña incorrectos. Intentos restantes: $intentosRestantes'
+        }));
       }
     } catch (e) {
       return Response.internalServerError(body: jsonEncode({'error': 'Error interno del servidor'}));
