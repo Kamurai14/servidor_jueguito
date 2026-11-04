@@ -6,12 +6,11 @@ import 'package:shelf_router/shelf_router.dart';
 import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
 import 'package:shelf_web_socket/shelf_web_socket.dart';
 
-// Importa tus clases locales usando 'package:'
+// Importaciones corregidas usando 'package:'
 import 'package:servidor_jueguito/base_datos.dart'; 
 import 'package:servidor_jueguito/gestor_salas.dart';
 
 // --- VARIABLES GLOBALES ---
-// NOTA: Si usabas otro texto para tu secreto, pon el tuyo aquí
 const String secretoJWT = 'mi_secreto_super_seguro'; 
 
 final db = BaseDatos();
@@ -20,6 +19,28 @@ final gestorSalas = GestorSalas();
 // --- SISTEMA ANTI FUERZA BRUTA ---
 final Map<String, int> intentosFallidos = {};
 final Map<String, DateTime> cuentasBloqueadas = {};
+
+// --- MIDDLEWARE PARA PERMITIR CONEXIONES WEB (CORS) ---
+Middleware corsHeaders() => (innerHandler) {
+  return (request) async {
+    // El navegador siempre manda una petición 'OPTIONS' fantasma antes del POST real
+    if (request.method == 'OPTIONS') {
+      return Response.ok('', headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Origin, Content-Type, Authorization',
+      });
+    }
+    
+    // Para el resto de peticiones normales, adjuntamos los permisos a la respuesta
+    final response = await innerHandler(request);
+    return response.change(headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Origin, Content-Type, Authorization',
+    });
+  };
+};
 
 void main(List<String> args) async {
   final router = Router();
@@ -41,7 +62,10 @@ void main(List<String> args) async {
       } else {
         return Response.forbidden(jsonEncode({'error': 'El usuario ya existe'}));
       }
-    } catch (e) {
+    } catch (e, stackTrace) {
+      print('=== ERROR FATAL EN REGISTRO ===');
+      print(e); 
+      print(stackTrace);
       return Response.internalServerError(body: jsonEncode({'error': 'Error interno del servidor'}));
     }
   });
@@ -105,7 +129,10 @@ void main(List<String> args) async {
           'error': 'Usuario o contraseña incorrectos. Intentos restantes: $intentosRestantes'
         }));
       }
-    } catch (e) {
+    } catch (e, stackTrace) {
+      print('=== ERROR FATAL EN LOGIN ===');
+      print(e); 
+      print(stackTrace);
       return Response.internalServerError(body: jsonEncode({'error': 'Error interno del servidor'}));
     }
   });
@@ -157,7 +184,7 @@ void main(List<String> args) async {
     }
 
     // Elevamos la conexión HTTP a un túnel de WebSockets
-    final handler = webSocketHandler((webSocket, _) {  // <--- Agregamos la coma y el guion bajo aquí
+    final handler = webSocketHandler((webSocket, _) {
       gestorSalas.manejarConexion(webSocket, usuarioJugador);
     });
 
@@ -167,9 +194,12 @@ void main(List<String> args) async {
   // ==========================================
   // INICIAR EL SERVIDOR
   // ==========================================
-  final handler = const Pipeline().addMiddleware(logRequests()).addHandler(router.call);
+  final handler = const Pipeline()
+      .addMiddleware(corsHeaders()) // <--- CORS HABILITADO AQUÍ
+      .addMiddleware(logRequests())
+      .addHandler(router.call);
   
-  // Usamos anyIPv4 para que pueda escuchar peticiones locales (localhost / 127.0.0.1) y del emulador (10.0.2.2)
+  // Usamos anyIPv4 para que pueda escuchar peticiones locales y web
   final server = await io.serve(handler, InternetAddress.anyIPv4, 8080);
   print('Servidor corriendo en http://${server.address.host}:${server.port}');
 }

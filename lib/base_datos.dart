@@ -4,6 +4,10 @@ import 'package:bcrypt/bcrypt.dart'; // <-- Importamos bcrypt (ya quitamos dart:
 class BaseDatos {
   late Database _db;
 
+  BaseDatos() {
+    inicializar(); // Esto hace que se ejecute solo al arrancar el server
+  }
+
   void inicializar() {
     _db = sqlite3.open('jueguito.db');
     
