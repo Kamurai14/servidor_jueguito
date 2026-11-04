@@ -1,76 +1,54 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:shelf/shelf.dart';
-import 'package:shelf/shelf_io.dart';
+import 'package:shelf/shelf_io.dart' as io;
 import 'package:shelf_router/shelf_router.dart';
 import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
+import 'package:shelf_web_socket/shelf_web_socket.dart';
 
-// Importamos nuestra nueva base de datos
-import 'package:servidor_jueguito/base_datos.dart';
+// Importa tus clases locales usando 'package:'
+import 'package:servidor_jueguito/base_datos.dart'; 
+import 'package:servidor_jueguito/gestor_salas.dart';
 
-const String secretoJWT = 'mi_super_secreto_jueguito_7x7';
+// --- VARIABLES GLOBALES ---
+// NOTA: Si usabas otro texto para tu secreto, pon el tuyo aquí
+const String secretoJWT = 'mi_secreto_super_seguro'; 
 
-// Instanciamos la base de datos globalmente para que las rutas la usen
 final db = BaseDatos();
+final gestorSalas = GestorSalas();
 
 // --- SISTEMA ANTI FUERZA BRUTA ---
 final Map<String, int> intentosFallidos = {};
 final Map<String, DateTime> cuentasBloqueadas = {};
 
-Middleware permisosCors() {
-  return (Handler manejadorInterno) {
-    return (Request request) async {
-      if (request.method == 'OPTIONS') {
-        return Response.ok('', headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-          'Access-Control-Allow-Headers': 'Origin, Content-Type, Authorization',
-        });
-      }
-      final response = await manejadorInterno(request);
-      return response.change(headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Origin, Content-Type, Authorization',
-      });
-    };
-  };
-}
-
 void main(List<String> args) async {
-  // Inicializamos SQLite antes de arrancar el servidor
-  db.inicializar();
-
   final router = Router();
 
+  // ==========================================
   // 1. RUTA DE REGISTRO
+  // ==========================================
   router.post('/registro', (Request request) async {
     try {
-      // Leemos los datos que nos mandó Flutter
       final cuerpo = await request.readAsString();
       final datos = jsonDecode(cuerpo);
       final usuario = datos['usuario'];
       final password = datos['password'];
 
-      if (usuario == null || password == null || usuario.isEmpty || password.isEmpty) {
-        return Response.badRequest(body: jsonEncode({'error': 'Faltan datos'}));
-      }
-
-      // Intentamos guardarlo en SQLite
-      bool exito = db.registrarUsuario(usuario, password);
+      final exito = db.registrarUsuario(usuario, password);
 
       if (exito) {
-        return Response.ok(jsonEncode({'mensaje': 'Usuario creado exitosamente'}));
+        return Response.ok(jsonEncode({'mensaje': 'Usuario registrado correctamente'}));
       } else {
-        // Código 409: Conflicto (el usuario ya existe)
-        return Response(409, body: jsonEncode({'error': 'El nombre de usuario ya está en uso'}));
+        return Response.forbidden(jsonEncode({'error': 'El usuario ya existe'}));
       }
     } catch (e) {
       return Response.internalServerError(body: jsonEncode({'error': 'Error interno del servidor'}));
     }
   });
 
-  // 2. RUTA DE LOGIN ACTUALIZADA
+  // ==========================================
+  // 2. RUTA DE LOGIN (Con Anti Fuerza Bruta)
+  // ==========================================
   router.post('/login', (Request request) async {
     try {
       final cuerpo = await request.readAsString();
@@ -78,27 +56,24 @@ void main(List<String> args) async {
       final usuario = datos['usuario'];
       final password = datos['password'];
 
-      // 1. TRAMPA ANTI-HACKERS: ¿El usuario está en la lista negra temporal?
+      // TRAMPA ANTI-HACKERS: ¿El usuario está bloqueado?
       if (cuentasBloqueadas.containsKey(usuario)) {
         final tiempoDesbloqueo = cuentasBloqueadas[usuario]!;
         if (DateTime.now().isBefore(tiempoDesbloqueo)) {
-          // Sigue bloqueado, lo pateamos sin siquiera consultar la base de datos
           return Response.forbidden(jsonEncode({
             'error': 'Demasiados intentos fallidos. Intenta de nuevo en 15 minutos.'
           }));
         } else {
-          // Ya cumplió su castigo de 15 minutos, lo perdonamos
           cuentasBloqueadas.remove(usuario);
           intentosFallidos.remove(usuario);
         }
       }
 
-      // 2. Intentamos el login normal en SQLite
+      // Validar en SQLite
       final usuarioDb = db.validarLogin(usuario, password);
 
       if (usuarioDb != null) {
-        // ÉXITO: Borramos su historial de fallos si tenía alguno
-        intentosFallidos.remove(usuario);
+        intentosFallidos.remove(usuario); // Borramos historial de fallos
 
         final jwt = JWT({
           'id_jugador': usuarioDb['id'],
@@ -116,10 +91,8 @@ void main(List<String> args) async {
           headers: {'Content-Type': 'application/json'},
         );
       } else {
-        // FALLO: Anotamos un error en su historial
         intentosFallidos[usuario] = (intentosFallidos[usuario] ?? 0) + 1;
 
-        // Si llegó a 5 errores, lo mandamos a la lista negra por 15 minutos
         if (intentosFallidos[usuario]! >= 5) {
           cuentasBloqueadas[usuario] = DateTime.now().add(const Duration(minutes: 15));
           return Response.forbidden(jsonEncode({
@@ -127,7 +100,6 @@ void main(List<String> args) async {
           }));
         }
 
-        // Si falló pero aún le quedan intentos:
         final intentosRestantes = 5 - intentosFallidos[usuario]!;
         return Response(401, body: jsonEncode({
           'error': 'Usuario o contraseña incorrectos. Intentos restantes: $intentosRestantes'
@@ -138,51 +110,66 @@ void main(List<String> args) async {
     }
   });
 
-  // 3. RUTA PARA BORRAR CUENTA
+  // ==========================================
+  // 3. RUTA PARA BORRAR CUENTA (Protegida con JWT)
+  // ==========================================
   router.delete('/borrar-cuenta', (Request request) async {
     try {
-      // 1. Verificamos que traiga el token en los headers
-      final authHeader = request.headers['authorization'];
+      final authHeader = request.headers['Authorization'];
       if (authHeader == null || !authHeader.startsWith('Bearer ')) {
-        return Response.forbidden(jsonEncode({'error': 'Acceso denegado: Token no proporcionado'}));
+        return Response.forbidden(jsonEncode({'error': 'Token no proporcionado'}));
       }
 
-      // 2. Extraemos el token (quitando "Bearer ")
       final token = authHeader.substring(7);
-
-      // 3. Desencriptamos usando tu llave secreta
       final jwt = JWT.verify(token, SecretKey(secretoJWT));
       
-      // 4. Obtenemos el nombre. En tu login usaste la llave 'nombre' para el payload
-      final nombreUsuario = jwt.payload['nombre'];
+      final idJugador = jwt.payload['id_jugador'];
 
-      // 5. Lo eliminamos de SQLite
-      bool exito = db.borrarUsuario(nombreUsuario);
+      final exito = db.borrarUsuario(idJugador);
 
       if (exito) {
-        return Response.ok(
-          jsonEncode({'mensaje': 'Cuenta eliminada exitosamente'}),
-          headers: {'Content-Type': 'application/json'},
-        );
+        return Response.ok(jsonEncode({'mensaje': 'Cuenta borrada exitosamente'}));
       } else {
-        return Response.internalServerError(
-          body: jsonEncode({'error': 'Error al eliminar el usuario en la base de datos'})
-        );
+        return Response.internalServerError(body: jsonEncode({'error': 'No se pudo borrar la cuenta'}));
       }
     } catch (e) {
-      // Si el JWT.verify falla (token alterado o expirado), cae aquí
-      return Response.forbidden(jsonEncode({'error': 'Token inválido o expirado'}));
+      return Response.forbidden(jsonEncode({'error': 'Token inválido o caducado'}));
     }
   });
 
-  final ip = InternetAddress.anyIPv4;
-  final port = int.parse(Platform.environment['PORT'] ?? '8080');
-  
-  final handler = Pipeline()
-      .addMiddleware(permisosCors())
-      .addMiddleware(logRequests())
-      .addHandler(router.call);
+  // ==========================================
+  // 4. ENDPOINT MULTIJUGADOR (WEBSOCKETS)
+  // ==========================================
+  router.get('/ws', (Request request) async {
+    final token = request.url.queryParameters['token'];
 
-  final server = await serve(handler, ip, port);
-  print('Servidor de Jueguito corriendo en http://${server.address.host}:${server.port}');
+    if (token == null) {
+      return Response.forbidden(jsonEncode({'error': 'Token no proporcionado'}));
+    }
+
+    String usuarioJugador;
+    try {
+      // Usamos el JWT para garantizar que nadie pueda entrar al socket sin autenticarse
+      final jwt = JWT.verify(token, SecretKey(secretoJWT));
+      usuarioJugador = jwt.payload['nombre'];
+    } catch (e) {
+      return Response.forbidden(jsonEncode({'error': 'Token inválido o expirado'}));
+    }
+
+    // Elevamos la conexión HTTP a un túnel de WebSockets
+    final handler = webSocketHandler((webSocket, _) {  // <--- Agregamos la coma y el guion bajo aquí
+      gestorSalas.manejarConexion(webSocket, usuarioJugador);
+    });
+
+    return await handler(request);
+  });
+
+  // ==========================================
+  // INICIAR EL SERVIDOR
+  // ==========================================
+  final handler = const Pipeline().addMiddleware(logRequests()).addHandler(router.call);
+  
+  // Usamos anyIPv4 para que pueda escuchar peticiones locales (localhost / 127.0.0.1) y del emulador (10.0.2.2)
+  final server = await io.serve(handler, InternetAddress.anyIPv4, 8080);
+  print('Servidor corriendo en http://${server.address.host}:${server.port}');
 }
