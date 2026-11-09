@@ -44,6 +44,7 @@ bin/
   server.dart
 lib/
   base_datos.dart
+  gestor_salas.dart
 test/
   server_test.dart
 .dockerignore
@@ -60,63 +61,135 @@ README.md
 <files>
 This section contains the contents of the repository's files.
 
-<file path="lib/base_datos.dart">
-import 'package:sqlite3/sqlite3.dart';
+<file path="lib/gestor_salas.dart">
 import 'dart:convert';
-import 'package:crypto/crypto.dart';
+import 'dart:math';
+import 'package:web_socket_channel/web_socket_channel.dart';
 
-class BaseDatos {
-  late Database _db;
+class Jugador {
+  final String usuario;
+  final WebSocketChannel canal;
+  String? codigoSala;
 
-  void inicializar() {
-    // Crea o abre un archivo físico llamado 'jueguito.db' en tu servidor
-    _db = sqlite3.open('jueguito.db');
-    
-    // Creamos la tabla de usuarios si no existe
-    _db.execute('''
-      CREATE TABLE IF NOT EXISTS usuarios (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        usuario TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL
-      );
-    ''');
-    print('✅ Base de datos SQLite inicializada correctamente.');
-  }
+  Jugador(this.usuario, this.canal);
+}
 
-  // Encripta la contraseña usando SHA-256 (NUNCA guardamos contraseñas en texto plano)
-  String _hashearPassword(String password) {
-    var bytes = utf8.encode(password);
-    var digest = sha256.convert(bytes);
-    return digest.toString();
-  }
+class GestorSalas {
+  // Llave: Código de 4 caracteres, Valor: Lista de 1 o 2 Jugadores
+  final Map<String, List<Jugador>> _salas = {};
+  
+  // Mapa de rastreo rápido para desconexiones súbitas
+  final Map<WebSocketChannel, Jugador> _conexionesActivas = {};
 
-  // Intenta registrar un usuario. Retorna false si el nombre ya está tomado.
-  bool registrarUsuario(String usuario, String password) {
-    try {
-      final hash = _hashearPassword(password);
-      final stmt = _db.prepare('INSERT INTO usuarios (usuario, password_hash) VALUES (?, ?)');
-      stmt.execute([usuario, hash]);
-      stmt.dispose();
-      return true;
-    } catch (e) {
-      // Si el usuario ya existe, SQLite lanzará un error por la restricción "UNIQUE"
-      return false; 
-    }
-  }
+  void manejarConexion(WebSocketChannel canal, String usuario) {
+    final jugador = Jugador(usuario, canal);
+    _conexionesActivas[canal] = jugador;
 
-  // Valida credenciales. Retorna los datos del usuario si es correcto, o null si falla.
-  Map<String, dynamic>? validarLogin(String usuario, String password) {
-    final hash = _hashearPassword(password);
-    
-    final ResultSet resultados = _db.select(
-      'SELECT * FROM usuarios WHERE usuario = ? AND password_hash = ?',
-      [usuario, hash]
+    // Escuchamos los mensajes entrantes de este socket
+    canal.stream.listen(
+      (mensaje) {
+        try {
+          final datos = jsonDecode(mensaje);
+          _procesarMensaje(jugador, datos);
+        } catch (e) {
+          print('Mensaje malformado ignorado: $mensaje');
+        }
+      },
+      // Si el internet del jugador falla o cierra la app, esto salta de inmediato
+      onDone: () => _manejarDesconexion(jugador),
+      onError: (error) => _manejarDesconexion(jugador),
     );
+  }
 
-    if (resultados.isNotEmpty) {
-      return resultados.first;
+  void _procesarMensaje(Jugador jugador, Map<String, dynamic> datos) {
+    final accion = datos['accion'];
+
+    switch (accion) {
+      case 'crear_sala':
+        String codigo = _generarCodigo();
+        jugador.codigoSala = codigo;
+        _salas[codigo] = [jugador];
+        _enviar(jugador.canal, {'tipo': 'sala_creada', 'codigo': codigo});
+        break;
+
+      case 'unirse_sala':
+        String codigo = (datos['codigo'] as String).toUpperCase();
+        if (_salas.containsKey(codigo)) {
+          if (_salas[codigo]!.length >= 2) {
+            _enviar(jugador.canal, {'tipo': 'error', 'mensaje': 'La sala ya está llena'});
+          } else {
+            jugador.codigoSala = codigo;
+            _salas[codigo]!.add(jugador);
+            
+            // Notificamos a ambos que la partida inicia. 
+            // El creador de la sala siempre empieza el primer turno.
+            final creador = _salas[codigo]![0];
+            _enviar(creador.canal, {'tipo': 'partida_lista', 'rival': jugador.usuario, 'esTurno': true});
+            _enviar(jugador.canal, {'tipo': 'partida_lista', 'rival': creador.usuario, 'esTurno': false});
+          }
+        } else {
+          _enviar(jugador.canal, {'tipo': 'error', 'mensaje': 'Código inválido o sala cerrada'});
+        }
+        break;
+
+      case 'jugada':
+      case 'rendirse':
+        // Reenviamos el movimiento (o rendición) intacto al rival
+        _notificarRival(jugador, datos);
+        
+        // Destruimos la sala si alguien se rinde para liberar memoria
+        if (accion == 'rendirse') {
+          _cerrarSala(jugador.codigoSala);
+        }
+        break;
     }
-    return null; 
+  }
+
+  void _manejarDesconexion(Jugador jugador) {
+    _conexionesActivas.remove(jugador.canal);
+    
+    if (jugador.codigoSala != null) {
+      // Si estaba a media partida, otorgamos victoria técnica al rival por error de red
+      _notificarRival(jugador, {
+        'tipo': 'rival_desconectado', 
+        'mensaje': 'El rival ha perdido la conexión. ¡Victoria técnica!'
+      });
+      _cerrarSala(jugador.codigoSala);
+    }
+  }
+
+  void _notificarRival(Jugador jugador, Map<String, dynamic> mensaje) {
+    if (jugador.codigoSala == null) return;
+    
+    final sala = _salas[jugador.codigoSala];
+    if (sala != null) {
+      for (var rival in sala) {
+        if (rival.usuario != jugador.usuario) {
+          _enviar(rival.canal, mensaje);
+        }
+      }
+    }
+  }
+
+  void _cerrarSala(String? codigo) {
+    if (codigo != null && _salas.containsKey(codigo)) {
+      _salas.remove(codigo);
+    }
+  }
+
+  void _enviar(WebSocketChannel canal, Map<String, dynamic> mensaje) {
+    canal.sink.add(jsonEncode(mensaje));
+  }
+
+  String _generarCodigo() {
+    // Evitamos O, 0, I, 1 para evitar errores de lectura en las invitaciones
+    const caracteres = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; 
+    final rnd = Random();
+    String codigo;
+    do {
+      codigo = String.fromCharCodes(Iterable.generate(4, (_) => caracteres.codeUnitAt(rnd.nextInt(caracteres.length))));
+    } while (_salas.containsKey(codigo));
+    return codigo;
   }
 }
 </file>
@@ -296,6 +369,80 @@ You should see the logging printed in the first terminal:
 ```
 </file>
 
+<file path="lib/base_datos.dart">
+import 'package:sqlite3/sqlite3.dart';
+import 'package:bcrypt/bcrypt.dart'; // <-- Importamos bcrypt (ya quitamos dart:convert y crypto)
+
+class BaseDatos {
+  late Database _db;
+
+  BaseDatos() {
+    inicializar(); // Esto hace que se ejecute solo al arrancar el server
+  }
+
+  void inicializar() {
+    _db = sqlite3.open('jueguito.db');
+    
+    _db.execute('''
+      CREATE TABLE IF NOT EXISTS usuarios (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        usuario TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL
+      );
+    ''');
+    print('✅ Base de datos SQLite inicializada correctamente.');
+  }
+
+  // Intenta registrar un usuario encriptando con Bcrypt y Sal aleatoria
+  bool registrarUsuario(String usuario, String password) {
+    try {
+      // BCrypt.gensalt() crea la protección aleatoria única para este usuario
+      final hashSeguro = BCrypt.hashpw(password, BCrypt.gensalt());
+      
+      final stmt = _db.prepare('INSERT INTO usuarios (usuario, password_hash) VALUES (?, ?)');
+      stmt.execute([usuario, hashSeguro]);
+      stmt.dispose();
+      return true;
+    } catch (e) {
+      return false; // El usuario ya existe
+    }
+  }
+
+  // Valida credenciales extrayendo el hash y comparándolo matemáticamente
+  Map<String, dynamic>? validarLogin(String usuario, String password) {
+    // 1. Buscamos al usuario SOLO por su nombre
+    final ResultSet resultados = _db.select(
+      'SELECT * FROM usuarios WHERE usuario = ?',
+      [usuario]
+    );
+
+    if (resultados.isNotEmpty) {
+      final usuarioDb = resultados.first;
+      final hashGuardado = usuarioDb['password_hash'] as String;
+      
+      // 2. BCrypt verifica si la contraseña plana coincide con el hash complejo
+      if (BCrypt.checkpw(password, hashGuardado)) {
+        return usuarioDb; // Las credenciales son correctas
+      }
+    }
+    return null; // Contraseña incorrecta o usuario no encontrado
+  }
+
+  // Elimina un usuario de la base de datos a partir de su nombre
+  bool borrarUsuario(String usuario) {
+    try {
+      final stmt = _db.prepare('DELETE FROM usuarios WHERE usuario = ?');
+      stmt.execute([usuario]);
+      stmt.dispose();
+      return true;
+    } catch (e) {
+      print('Error al borrar usuario: $e');
+      return false;
+    }
+  }
+}
+</file>
+
 <file path="pubspec.lock">
 # Generated by pub
 # See https://dart.dev/tools/pub/glossary#lockfile
@@ -332,6 +479,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.13.1"
+  bcrypt:
+    dependency: "direct main"
+    description:
+      name: bcrypt
+      sha256: "6073a700cbbc59f1d4ab27cd532755e3de5e676c4941f535f351374df849270b"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.2.0"
   boolean_selector:
     dependency: transitive
     description:
@@ -597,7 +752,7 @@ packages:
     source: hosted
     version: "1.2.0"
   shelf_web_socket:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: shelf_web_socket
       sha256: "3632775c8e90d6c9712f883e633716432a27758216dfb61bd86a8321c0580925"
@@ -775,6 +930,8 @@ dependencies:
   dart_jsonwebtoken: ^3.0.0
   sqlite3: ^2.9.4
   crypto: ^3.0.8
+  bcrypt: ^1.2.0
+  shelf_web_socket: ^3.0.0
 
 dev_dependencies:
   http: ^1.2.2
@@ -786,72 +943,78 @@ dev_dependencies:
 import 'dart:convert';
 import 'dart:io';
 import 'package:shelf/shelf.dart';
-import 'package:shelf/shelf_io.dart';
+import 'package:shelf/shelf_io.dart' as io;
 import 'package:shelf_router/shelf_router.dart';
 import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
+import 'package:shelf_web_socket/shelf_web_socket.dart';
 
-// Importamos nuestra nueva base de datos
-import 'package:servidor_jueguito/base_datos.dart';
+// Importaciones corregidas usando 'package:'
+import 'package:servidor_jueguito/base_datos.dart'; 
+import 'package:servidor_jueguito/gestor_salas.dart';
 
-const String secretoJWT = 'mi_super_secreto_jueguito_7x7';
+// --- VARIABLES GLOBALES ---
+const String secretoJWT = 'mi_secreto_super_seguro'; 
 
-// Instanciamos la base de datos globalmente para que las rutas la usen
 final db = BaseDatos();
+final gestorSalas = GestorSalas();
 
-Middleware permisosCors() {
-  return (Handler manejadorInterno) {
-    return (Request request) async {
-      if (request.method == 'OPTIONS') {
-        return Response.ok('', headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-          'Access-Control-Allow-Headers': 'Origin, Content-Type, Authorization',
-        });
-      }
-      final response = await manejadorInterno(request);
-      return response.change(headers: {
+// --- SISTEMA ANTI FUERZA BRUTA ---
+final Map<String, int> intentosFallidos = {};
+final Map<String, DateTime> cuentasBloqueadas = {};
+
+// --- MIDDLEWARE PARA PERMITIR CONEXIONES WEB (CORS) ---
+Middleware corsHeaders() => (innerHandler) {
+  return (request) async {
+    // El navegador siempre manda una petición 'OPTIONS' fantasma antes del POST real
+    if (request.method == 'OPTIONS') {
+      return Response.ok('', headers: {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': 'Origin, Content-Type, Authorization',
       });
-    };
+    }
+    
+    // Para el resto de peticiones normales, adjuntamos los permisos a la respuesta
+    final response = await innerHandler(request);
+    return response.change(headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Origin, Content-Type, Authorization',
+    });
   };
-}
+};
 
 void main(List<String> args) async {
-  // Inicializamos SQLite antes de arrancar el servidor
-  db.inicializar();
-
   final router = Router();
 
+  // ==========================================
   // 1. RUTA DE REGISTRO
+  // ==========================================
   router.post('/registro', (Request request) async {
     try {
-      // Leemos los datos que nos mandó Flutter
       final cuerpo = await request.readAsString();
       final datos = jsonDecode(cuerpo);
       final usuario = datos['usuario'];
       final password = datos['password'];
 
-      if (usuario == null || password == null || usuario.isEmpty || password.isEmpty) {
-        return Response.badRequest(body: jsonEncode({'error': 'Faltan datos'}));
-      }
-
-      // Intentamos guardarlo en SQLite
-      bool exito = db.registrarUsuario(usuario, password);
+      final exito = db.registrarUsuario(usuario, password);
 
       if (exito) {
-        return Response.ok(jsonEncode({'mensaje': 'Usuario creado exitosamente'}));
+        return Response.ok(jsonEncode({'mensaje': 'Usuario registrado correctamente'}));
       } else {
-        // Código 409: Conflicto (el usuario ya existe)
-        return Response(409, body: jsonEncode({'error': 'El nombre de usuario ya está en uso'}));
+        return Response.forbidden(jsonEncode({'error': 'El usuario ya existe'}));
       }
-    } catch (e) {
+    } catch (e, stackTrace) {
+      print('=== ERROR FATAL EN REGISTRO ===');
+      print(e); 
+      print(stackTrace);
       return Response.internalServerError(body: jsonEncode({'error': 'Error interno del servidor'}));
     }
   });
 
-  // 2. RUTA DE LOGIN ACTUALIZADA
+  // ==========================================
+  // 2. RUTA DE LOGIN (Con Anti Fuerza Bruta)
+  // ==========================================
   router.post('/login', (Request request) async {
     try {
       final cuerpo = await request.readAsString();
@@ -859,42 +1022,128 @@ void main(List<String> args) async {
       final usuario = datos['usuario'];
       final password = datos['password'];
 
-      // Validamos contra SQLite
+      // TRAMPA ANTI-HACKERS: ¿El usuario está bloqueado?
+      if (cuentasBloqueadas.containsKey(usuario)) {
+        final tiempoDesbloqueo = cuentasBloqueadas[usuario]!;
+        if (DateTime.now().isBefore(tiempoDesbloqueo)) {
+          return Response.forbidden(jsonEncode({
+            'error': 'Demasiados intentos fallidos. Intenta de nuevo en 15 minutos.'
+          }));
+        } else {
+          cuentasBloqueadas.remove(usuario);
+          intentosFallidos.remove(usuario);
+        }
+      }
+
+      // Validar en SQLite
       final usuarioDb = db.validarLogin(usuario, password);
 
       if (usuarioDb != null) {
-        // Si las credenciales son correctas, generamos su Token
+        intentosFallidos.remove(usuario); // Borramos historial de fallos
+
         final jwt = JWT({
           'id_jugador': usuarioDb['id'],
           'nombre': usuarioDb['usuario'],
           'rol': 'jugador'
         });
 
-        final token = jwt.sign(SecretKey(secretoJWT));
+        final token = jwt.sign(
+          SecretKey(secretoJWT),
+          expiresIn: const Duration(days: 7),
+        );
 
         return Response.ok(
           jsonEncode({'mensaje': 'Login exitoso', 'token': token}),
           headers: {'Content-Type': 'application/json'},
         );
       } else {
-        // Código 401: No autorizado (credenciales incorrectas)
-        return Response(401, body: jsonEncode({'error': 'Usuario o contraseña incorrectos'}));
+        intentosFallidos[usuario] = (intentosFallidos[usuario] ?? 0) + 1;
+
+        if (intentosFallidos[usuario]! >= 5) {
+          cuentasBloqueadas[usuario] = DateTime.now().add(const Duration(minutes: 15));
+          return Response.forbidden(jsonEncode({
+            'error': 'Has fallado 5 veces. Cuenta bloqueada por seguridad durante 15 minutos.'
+          }));
+        }
+
+        final intentosRestantes = 5 - intentosFallidos[usuario]!;
+        return Response(401, body: jsonEncode({
+          'error': 'Usuario o contraseña incorrectos. Intentos restantes: $intentosRestantes'
+        }));
       }
-    } catch (e) {
+    } catch (e, stackTrace) {
+      print('=== ERROR FATAL EN LOGIN ===');
+      print(e); 
+      print(stackTrace);
       return Response.internalServerError(body: jsonEncode({'error': 'Error interno del servidor'}));
     }
   });
 
-  final ip = InternetAddress.anyIPv4;
-  final port = int.parse(Platform.environment['PORT'] ?? '8080');
-  
-  final handler = Pipeline()
-      .addMiddleware(permisosCors())
+  // ==========================================
+  // 3. RUTA PARA BORRAR CUENTA (Protegida con JWT)
+  // ==========================================
+  router.delete('/borrar-cuenta', (Request request) async {
+    try {
+      final authHeader = request.headers['Authorization'];
+      if (authHeader == null || !authHeader.startsWith('Bearer ')) {
+        return Response.forbidden(jsonEncode({'error': 'Token no proporcionado'}));
+      }
+
+      final token = authHeader.substring(7);
+      final jwt = JWT.verify(token, SecretKey(secretoJWT));
+      
+      final idJugador = jwt.payload['id_jugador'];
+
+      final exito = db.borrarUsuario(idJugador);
+
+      if (exito) {
+        return Response.ok(jsonEncode({'mensaje': 'Cuenta borrada exitosamente'}));
+      } else {
+        return Response.internalServerError(body: jsonEncode({'error': 'No se pudo borrar la cuenta'}));
+      }
+    } catch (e) {
+      return Response.forbidden(jsonEncode({'error': 'Token inválido o caducado'}));
+    }
+  });
+
+  // ==========================================
+  // 4. ENDPOINT MULTIJUGADOR (WEBSOCKETS)
+  // ==========================================
+  router.get('/ws', (Request request) async {
+    final token = request.url.queryParameters['token'];
+
+    if (token == null) {
+      return Response.forbidden(jsonEncode({'error': 'Token no proporcionado'}));
+    }
+
+    String usuarioJugador;
+    try {
+      // Usamos el JWT para garantizar que nadie pueda entrar al socket sin autenticarse
+      final jwt = JWT.verify(token, SecretKey(secretoJWT));
+      usuarioJugador = jwt.payload['nombre'];
+    } catch (e) {
+      return Response.forbidden(jsonEncode({'error': 'Token inválido o expirado'}));
+    }
+
+    // Elevamos la conexión HTTP a un túnel de WebSockets
+    final handler = webSocketHandler((webSocket, _) {
+      gestorSalas.manejarConexion(webSocket, usuarioJugador);
+    });
+
+    return await handler(request);
+  });
+
+  // ==========================================
+  // INICIAR EL SERVIDOR
+  // ==========================================
+  final handler = const Pipeline()
+      .addMiddleware(corsHeaders()) // <--- CORS HABILITADO AQUÍ
       .addMiddleware(logRequests())
       .addHandler(router.call);
-
-  final server = await serve(handler, ip, port);
-  print('Servidor de Jueguito corriendo en http://${server.address.host}:${server.port}');
+  
+  // Usamos anyIPv4 para que pueda escuchar peticiones locales y web
+  final server = await io.serve(handler, InternetAddress.anyIPv4, 8080);
+  print('Servidor corriendo en http://${server.address.host}:${server.port}');
 }
 </file>
 
