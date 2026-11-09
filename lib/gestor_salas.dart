@@ -15,13 +15,17 @@ class Sala {
   final String codigo;
   final Jugador anfitrion;
   final List<Jugador> jugadores = [];
-  
+
   // ÁRBITRO: Lleva el conteo de cuántas veces se ha reclamado una zona (máximo 3)
   // Ej: {'AM': 1, 'NA1': 3}
-  final Map<String, int> zonasReclamadas = {}; 
+  final Map<String, int> zonasReclamadas = {};
   bool enJuego = false;
+  
+  // NUEVO: La sala recuerda su mapa
+  String mapa; 
 
-  Sala(this.codigo, this.anfitrion) {
+  // Modificamos el constructor para aceptar el mapa (por defecto mapa1)
+  Sala(this.codigo, this.anfitrion, {this.mapa = 'mapa1'}) {
     jugadores.add(anfitrion);
   }
 
@@ -63,12 +67,18 @@ class GestorSalas {
       case 'crear_sala':
         String codigo = _generarCodigo();
         jugador.codigoSala = codigo;
-        final nuevaSala = Sala(codigo, jugador);
-        _salas[codigo] = nuevaSala;
         
+        // LEEMOS EL MAPA QUE ELIGIÓ EL ANFITRIÓN (si no manda nada, ponemos mapa1)
+        final mapaElegido = datos['mapa'] ?? 'mapa1';
+        
+        // CREAMOS LA SALA PASÁNDOLE EL MAPA
+        final nuevaSala = Sala(codigo, jugador, mapa: mapaElegido);
+        _salas[codigo] = nuevaSala;
+
         _enviar(jugador.canal, {
-          'tipo': 'sala_creada', 
+          'tipo': 'sala_creada',
           'codigo': codigo,
+          'mapa': mapaElegido, // Le confirmamos el mapa de vuelta
           'jugadores': nuevaSala.obtenerNombresJugadores()
         });
         break;
@@ -88,10 +98,11 @@ class GestorSalas {
             
             // Le confirmamos al que acaba de entrar
             _enviar(jugador.canal, {
-              'tipo': 'unido_exitosamente', 
+              'tipo': 'unido_exitosamente',
               'codigo': codigo,
+              'mapa': sala.mapa, // EL SERVIDOR LE AVISA EL MAPA DE ESTA SALA AL INVITADO
               'anfitrion': sala.anfitrion.usuario,
-              'jugadores': sala.obtenerNombresJugadores()
+              'jugadores': sala.obtenerNombresJugadores(),
             });
 
             // Le avisamos a TODOS los demás que la lista de espera se actualizó
@@ -111,7 +122,7 @@ class GestorSalas {
         if (sala != null && sala.anfitrion == jugador) {
           if (sala.jugadores.length >= 2) { 
             sala.enJuego = true;
-            _notificarSala(sala, {'tipo': 'partida_lista'}); // ¡Arranca el juego para todos!
+            _notificarSala(sala, {'tipo': 'partida_lista', 'mapa': sala.mapa}); // ¡Arranca el juego para todos!
           } else {
             _enviar(jugador.canal, {'tipo': 'error', 'mensaje': 'Se necesitan al menos 2 jugadores'});
           }
