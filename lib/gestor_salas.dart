@@ -10,7 +10,7 @@ class Jugador {
   Jugador(this.usuario, this.canal);
 }
 
-// NUEVO: La clase Sala actúa como el Árbitro de la partida
+// La clase Sala actúa como el Árbitro de la partida
 class Sala {
   final String codigo;
   final Jugador anfitrion;
@@ -19,16 +19,16 @@ class Sala {
   // ÁRBITRO: Lleva el conteo de cuántas veces se ha reclamado una zona (máximo 3)
   // Ej: {'AM': 1, 'NA1': 3}
   final Map<String, int> zonasReclamadas = {};
-  final Set<String> jugadoresListos = {}; // <-- NUEVO: Para saber quién ya puso sus 6 piezas
+  final Set<String> jugadoresListos = {}; // Para saber quién ya puso sus 6 piezas
   final Set<String> jugadoresTerminaronTurno = {};
   bool enJuego = false;
   
-  // NUEVO: La sala recuerda su mapa
+  // La sala recuerda su mapa
   String mapa; 
-  // NUEVO: Para llevar el historial de empates -> Ejemplo: 'AM': [5, 8] (En el turno 5 se dio el 1er lugar, en el 8 el 2do lugar)
+  // Para llevar el historial de empates -> Ejemplo: 'AM': [5, 8] (En el turno 5 se dio el 1er lugar, en el 8 el 2do lugar)
   final Map<String, List<int>> turnosZonasReclamadas = {};
 
-  // Modificamos el constructor para aceptar el mapa (por defecto mapa1)
+  // Constructor para aceptar el mapa (por defecto mapa1)
   Sala(this.codigo, this.anfitrion, {this.mapa = 'mapa1'}) {
     jugadores.add(anfitrion);
   }
@@ -39,7 +39,7 @@ class Sala {
 }
 
 class GestorSalas {
-  // Ahora guardamos objetos Sala completos en lugar de simples listas
+  // Guardamos objetos Sala completos
   final Map<String, Sala> _salas = {};
   final Map<WebSocketChannel, Jugador> _conexionesActivas = {};
 
@@ -184,7 +184,6 @@ class GestorSalas {
         final sala = _salas[jugador.codigoSala];
         // Solo el anfitrión puede detonar los dados globales
         if (sala != null && sala.anfitrion == jugador) {
-          // Asegúrate de tener: import 'dart:math'; al inicio de gestor_salas.dart
           final d1 = Random().nextInt(6) + 1;
           final d2 = Random().nextInt(6) + 1;
           
@@ -221,40 +220,86 @@ class GestorSalas {
         break;
 
       case 'jugada':
-        // Reenviamos las jugadas a los demás (por si en el futuro quieres mostrar mini-tableros de los rivales)
+        // Reenviamos las jugadas a los demás
         _notificarRival(jugador, datos);
+        break;
+
+      case 'declarar_victoria':
+        final sala = _salas[jugador.codigoSala];
+        if (sala != null && sala.enJuego) {
+          _notificarSala(sala, {
+            'tipo': 'fin_de_partida',
+            'ganador': jugador.usuario,
+            'puntuacion': datos['puntuacion']
+          });
+          _salas.remove(sala.codigo); // Cerramos la sala, la partida terminó
+        }
         break;
 
       case 'rendirse':
         _manejarDesconexion(jugador);
         break;
+
     }
   }
 
+  // =======================================================
+  // PARAMÉDICO DE RED: MANEJO DE DESCONEXIONES
+  // =======================================================
   void _manejarDesconexion(Jugador jugador) {
     _conexionesActivas.remove(jugador.canal);
     
     if (jugador.codigoSala != null) {
       final sala = _salas[jugador.codigoSala];
       if (sala != null) {
-        sala.jugadores.remove(jugador);
-
-        if (sala.jugadores.isEmpty) {
-          // Si ya no hay nadie, destruimos la sala
-          _salas.remove(jugador.codigoSala);
-        } else {
-          // Si se va el anfitrión en pleno lobby, cerramos la sala para todos
-          if (!sala.enJuego && sala.anfitrion == jugador) {
-             _notificarSala(sala, {'tipo': 'error', 'mensaje': 'El anfitrión cerró la sala.'});
-             _salas.remove(jugador.codigoSala);
-          } else {
-             // Si el juego ya empezó o no era el anfitrión, el juego continúa sin él
+        
+        if (sala.enJuego) {
+          // EL JUEGO YA EMPEZÓ
+          if (sala.anfitrion == jugador || sala.jugadores.length == 1) {
+            // Si el anfitrión huye o si solo queda 1 jugador vivo en la sala -> Victoria por abandono
             _notificarSala(sala, {
-              'tipo': sala.enJuego ? 'jugador_desconectado' : 'lobby_actualizado',
-              'jugador': jugador.usuario,
-              'jugadores': sala.obtenerNombresJugadores(),
-              'mensaje': '${jugador.usuario} ha salido de la partida.'
+              'tipo': 'victoria_por_abandono',
+              'mensaje': sala.anfitrion == jugador 
+                  ? 'El anfitrión huyó cobardemente. ¡Victoria para los sobrevivientes!' 
+                  : 'Todos tus rivales han huido. ¡Has ganado por abandono!'
             });
+            _salas.remove(jugador.codigoSala);
+          } else {
+            // Si huye un invitado pero quedan varios, el juego sigue
+            sala.jugadoresListos.remove(jugador.usuario);
+            sala.jugadoresTerminaronTurno.remove(jugador.usuario);
+
+            _notificarSala(sala, {
+              'tipo': 'jugador_abandono',
+              'usuario': jugador.usuario,
+              'jugadores': sala.obtenerNombresJugadores(),
+              'total': sala.jugadores.length,
+            });
+
+            // Rescate de turno atascado
+            if (sala.jugadoresTerminaronTurno.length >= sala.jugadores.length) {
+              sala.jugadoresTerminaronTurno.clear();
+              _notificarSala(sala, {
+                'tipo': 'nuevos_dados',
+                'dado1': Random().nextInt(6) + 1,
+                'dado2': Random().nextInt(6) + 1
+              });
+            }
+          }
+        } else {
+          // ESTABAN EN EL LOBBY
+          if (sala.anfitrion == jugador) {
+            _notificarSala(sala, {'tipo': 'sala_cerrada', 'razon': 'El anfitrión cerró la sala.'});
+            _salas.remove(jugador.codigoSala);
+          } else {
+            if (sala.jugadores.isEmpty) {
+              _salas.remove(jugador.codigoSala);
+            } else {
+              _notificarSala(sala, {
+                'tipo': 'lobby_actualizado',
+                'jugadores': sala.obtenerNombresJugadores()
+              });
+            }
           }
         }
       }
