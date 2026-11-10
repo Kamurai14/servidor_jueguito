@@ -19,6 +19,8 @@ class Sala {
   // ÁRBITRO: Lleva el conteo de cuántas veces se ha reclamado una zona (máximo 3)
   // Ej: {'AM': 1, 'NA1': 3}
   final Map<String, int> zonasReclamadas = {};
+  final Set<String> jugadoresListos = {}; // <-- NUEVO: Para saber quién ya puso sus 6 piezas
+  final Set<String> jugadoresTerminaronTurno = {};
   bool enJuego = false;
   
   // NUEVO: La sala recuerda su mapa
@@ -161,9 +163,57 @@ class GestorSalas {
         }
         break;
 
+      case 'listo_para_jugar':
+        final sala = _salas[jugador.codigoSala];
+        if (sala != null) {
+          sala.jugadoresListos.add(jugador.usuario);
+          // Le avisamos a todos cómo va el conteo
+          _notificarSala(sala, {
+            'tipo': 'actualizacion_listos',
+            'listos': sala.jugadoresListos.length,
+            'total': sala.jugadores.length
+          });
+        }
+        break;
+
       case 'tirar_dados':
-        // Cuando alguien tira los dados, se los mandamos a todos para que tengan los mismos números
-        _notificarSala(_salas[jugador.codigoSala]!, datos);
+        final sala = _salas[jugador.codigoSala];
+        // Solo el anfitrión puede detonar los dados globales
+        if (sala != null && sala.anfitrion == jugador) {
+          // Asegúrate de tener: import 'dart:math'; al inicio de gestor_salas.dart
+          final d1 = Random().nextInt(6) + 1;
+          final d2 = Random().nextInt(6) + 1;
+          
+          _notificarSala(sala, {
+            'tipo': 'nuevos_dados',
+            'dado1': d1,
+            'dado2': d2
+          });
+        }
+        break;
+
+      case 'terminar_turno':
+        final sala = _salas[jugador.codigoSala];
+        if (sala != null && sala.enJuego) {
+          // Registramos que este jugador ya acabó su turno
+          sala.jugadoresTerminaronTurno.add(jugador.usuario);
+          
+          // ¿Ya terminaron TODOS los jugadores de la sala?
+          if (sala.jugadoresTerminaronTurno.length >= sala.jugadores.length) {
+            // Limpiamos la lista para la siguiente ronda
+            sala.jugadoresTerminaronTurno.clear(); 
+            
+            // EL SERVIDOR TIRA LOS DADOS AUTOMÁTICAMENTE
+            final d1 = Random().nextInt(6) + 1;
+            final d2 = Random().nextInt(6) + 1;
+            
+            _notificarSala(sala, {
+              'tipo': 'nuevos_dados',
+              'dado1': d1,
+              'dado2': d2
+            });
+          }
+        }
         break;
 
       case 'jugada':
