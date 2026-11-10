@@ -25,6 +25,8 @@ class Sala {
   
   // NUEVO: La sala recuerda su mapa
   String mapa; 
+  // NUEVO: Para llevar el historial de empates -> Ejemplo: 'AM': [5, 8] (En el turno 5 se dio el 1er lugar, en el 8 el 2do lugar)
+  final Map<String, List<int>> turnosZonasReclamadas = {};
 
   // Modificamos el constructor para aceptar el mapa (por defecto mapa1)
   Sala(this.codigo, this.anfitrion, {this.mapa = 'mapa1'}) {
@@ -136,30 +138,32 @@ class GestorSalas {
       // ----------------------------------------------------
       case 'reclamar_zona':
         final sala = _salas[jugador.codigoSala];
-        if (sala != null) {
+        if (sala != null && sala.enJuego) {
           final idZona = datos['idZona'];
-          int vecesReclamada = sala.zonasReclamadas[idZona] ?? 0;
+          final turno = datos['turno']; // Flutter ahora nos dirá en qué turno lo logró
 
-          if (vecesReclamada < 3) { // Regla: Solo 3 personas pueden puntuar por zona
-            vecesReclamada++;
-            sala.zonasReclamadas[idZona] = vecesReclamada;
-
-            // Le gritamos a TODA LA SALA quién reclamó la zona y en qué lugar quedó (1ero, 2do o 3ro)
-            // Con esto el frontend sabrá cómo atenuar el color y cuántos puntos darle
-            _notificarSala(sala, {
-              'tipo': 'zona_reclamada',
-              'idZona': idZona,
-              'jugador': jugador.usuario,
-              'lugar': vecesReclamada 
-            });
-          } else {
-            // Ya se reclamó 3 veces, le avisamos al jugador lento que se quedó sin puntos
-            _enviar(jugador.canal, {
-              'tipo': 'zona_agotada',
-              'idZona': idZona,
-              'mensaje': 'Esta zona ya fue reclamada 3 veces por otros jugadores.'
-            });
+          // Si nadie la había reclamado, creamos su lista
+          if (!sala.turnosZonasReclamadas.containsKey(idZona)) {
+            sala.turnosZonasReclamadas[idZona] = [];
           }
+          
+          final turnosDeEstaZona = sala.turnosZonasReclamadas[idZona]!;
+          
+          // Si este turno es nuevo, lo agregamos al historial
+          if (!turnosDeEstaZona.contains(turno)) {
+            turnosDeEstaZona.add(turno);
+            turnosDeEstaZona.sort(); // Lo ordenamos por si el internet de alguien es lento
+          }
+          
+          // La magia: El índice del turno en la lista nos da exactamente el lugar
+          final lugar = turnosDeEstaZona.indexOf(turno) + 1;
+
+          _notificarSala(sala, {
+            'tipo': 'zona_reclamada',
+            'idZona': idZona,
+            'lugar': lugar,
+            'usuario': jugador.usuario
+          });
         }
         break;
 
