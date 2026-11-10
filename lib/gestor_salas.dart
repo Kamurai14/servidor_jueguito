@@ -25,7 +25,7 @@ class Sala {
   
   // La sala recuerda su mapa
   String mapa; 
-  // Para llevar el historial de empates -> Ejemplo: 'AM': [5, 8] (En el turno 5 se dio el 1er lugar, en el 8 el 2do lugar)
+  // Para llevar el historial de empates -> Ejemplo: 'AM': [5, 8]
   final Map<String, List<int>> turnosZonasReclamadas = {};
 
   // Constructor para aceptar el mapa (por defecto mapa1)
@@ -82,7 +82,7 @@ class GestorSalas {
         _enviar(jugador.canal, {
           'tipo': 'sala_creada',
           'codigo': codigo,
-          'mapa': mapaElegido, // Le confirmamos el mapa de vuelta
+          'mapa': mapaElegido, 
           'jugadores': nuevaSala.obtenerNombresJugadores()
         });
         break;
@@ -104,7 +104,7 @@ class GestorSalas {
             _enviar(jugador.canal, {
               'tipo': 'unido_exitosamente',
               'codigo': codigo,
-              'mapa': sala.mapa, // EL SERVIDOR LE AVISA EL MAPA DE ESTA SALA AL INVITADO
+              'mapa': sala.mapa, 
               'anfitrion': sala.anfitrion.usuario,
               'jugadores': sala.obtenerNombresJugadores(),
             });
@@ -122,11 +122,10 @@ class GestorSalas {
 
       case 'iniciar_partida':
         final sala = _salas[jugador.codigoSala];
-        // Solo el anfitrión puede detonar el inicio
         if (sala != null && sala.anfitrion == jugador) {
           if (sala.jugadores.length >= 2) { 
             sala.enJuego = true;
-            _notificarSala(sala, {'tipo': 'partida_lista', 'mapa': sala.mapa}); // ¡Arranca el juego para todos!
+            _notificarSala(sala, {'tipo': 'partida_lista', 'mapa': sala.mapa}); 
           } else {
             _enviar(jugador.canal, {'tipo': 'error', 'mensaje': 'Se necesitan al menos 2 jugadores'});
           }
@@ -140,22 +139,19 @@ class GestorSalas {
         final sala = _salas[jugador.codigoSala];
         if (sala != null && sala.enJuego) {
           final idZona = datos['idZona'];
-          final turno = datos['turno']; // Flutter ahora nos dirá en qué turno lo logró
+          final turno = datos['turno']; 
 
-          // Si nadie la había reclamado, creamos su lista
           if (!sala.turnosZonasReclamadas.containsKey(idZona)) {
             sala.turnosZonasReclamadas[idZona] = [];
           }
           
           final turnosDeEstaZona = sala.turnosZonasReclamadas[idZona]!;
           
-          // Si este turno es nuevo, lo agregamos al historial
           if (!turnosDeEstaZona.contains(turno)) {
             turnosDeEstaZona.add(turno);
-            turnosDeEstaZona.sort(); // Lo ordenamos por si el internet de alguien es lento
+            turnosDeEstaZona.sort(); 
           }
           
-          // La magia: El índice del turno en la lista nos da exactamente el lugar
           final lugar = turnosDeEstaZona.indexOf(turno) + 1;
 
           _notificarSala(sala, {
@@ -171,7 +167,6 @@ class GestorSalas {
         final sala = _salas[jugador.codigoSala];
         if (sala != null) {
           sala.jugadoresListos.add(jugador.usuario);
-          // Le avisamos a todos cómo va el conteo
           _notificarSala(sala, {
             'tipo': 'actualizacion_listos',
             'listos': sala.jugadoresListos.length,
@@ -182,7 +177,6 @@ class GestorSalas {
 
       case 'tirar_dados':
         final sala = _salas[jugador.codigoSala];
-        // Solo el anfitrión puede detonar los dados globales
         if (sala != null && sala.anfitrion == jugador) {
           final d1 = Random().nextInt(6) + 1;
           final d2 = Random().nextInt(6) + 1;
@@ -198,15 +192,11 @@ class GestorSalas {
       case 'terminar_turno':
         final sala = _salas[jugador.codigoSala];
         if (sala != null && sala.enJuego) {
-          // Registramos que este jugador ya acabó su turno
           sala.jugadoresTerminaronTurno.add(jugador.usuario);
           
-          // ¿Ya terminaron TODOS los jugadores de la sala?
           if (sala.jugadoresTerminaronTurno.length >= sala.jugadores.length) {
-            // Limpiamos la lista para la siguiente ronda
             sala.jugadoresTerminaronTurno.clear(); 
             
-            // EL SERVIDOR TIRA LOS DADOS AUTOMÁTICAMENTE
             final d1 = Random().nextInt(6) + 1;
             final d2 = Random().nextInt(6) + 1;
             
@@ -220,7 +210,6 @@ class GestorSalas {
         break;
 
       case 'jugada':
-        // Reenviamos las jugadas a los demás
         _notificarRival(jugador, datos);
         break;
 
@@ -232,14 +221,13 @@ class GestorSalas {
             'ganador': jugador.usuario,
             'puntuacion': datos['puntuacion']
           });
-          _salas.remove(sala.codigo); // Cerramos la sala, la partida terminó
+          _salas.remove(sala.codigo); 
         }
         break;
 
       case 'rendirse':
         _manejarDesconexion(jugador);
         break;
-
     }
   }
 
@@ -292,6 +280,7 @@ class GestorSalas {
             _notificarSala(sala, {'tipo': 'sala_cerrada', 'razon': 'El anfitrión cerró la sala.'});
             _salas.remove(jugador.codigoSala);
           } else {
+            sala.jugadores.remove(jugador);
             if (sala.jugadores.isEmpty) {
               _salas.remove(jugador.codigoSala);
             } else {

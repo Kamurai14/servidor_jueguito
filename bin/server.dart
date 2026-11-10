@@ -195,11 +195,15 @@ void main(List<String> args) async {
   // INICIAR EL SERVIDOR
   // ==========================================
   final handler = const Pipeline()
-      .addMiddleware(corsHeaders()) // <--- CORS HABILITADO AQUÍ
+      .addMiddleware(corsHeaders()) 
       .addMiddleware(logRequests())
       .addHandler(router.call);
   
-  // Usamos anyIPv4 para que pueda escuchar peticiones locales y web
-  final server = await io.serve(handler, InternetAddress.anyIPv4, 8080);
+  // Leemos el puerto que nos asigne la nube (Render) o usamos el 8080 en local
+  final puertoEnv = Platform.environment['PORT'] ?? '8080';
+  final port = int.parse(puertoEnv);
+
+  // Usamos anyIPv4 para que pueda escuchar peticiones locales y web de forma segura
+  final server = await io.serve(handler, InternetAddress.anyIPv4, port);
   print('Servidor corriendo en http://${server.address.host}:${server.port}');
 }
