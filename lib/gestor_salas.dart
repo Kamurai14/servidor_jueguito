@@ -303,7 +303,9 @@ class GestorSalas {
   void _notificarSala(Sala sala, Map<String, dynamic> mensaje) {
     final payload = jsonEncode(mensaje);
     for (var j in sala.jugadores) {
-      j.canal.sink.add(payload);
+      try {
+        j.canal.sink.add(payload);
+      } catch (_) {} // ESCUDO: Si el celular está apagado, lo ignora y el servidor no crashea
     }
   }
 
@@ -316,14 +318,18 @@ class GestorSalas {
       final payload = jsonEncode(mensaje);
       for (var rival in sala.jugadores) {
         if (rival.usuario != jugador.usuario) {
-          rival.canal.sink.add(payload);
+          try {
+            rival.canal.sink.add(payload);
+          } catch (_) {}
         }
       }
     }
   }
 
   void _enviar(WebSocketChannel canal, Map<String, dynamic> mensaje) {
-    canal.sink.add(jsonEncode(mensaje));
+    try {
+      canal.sink.add(jsonEncode(mensaje));
+    } catch (_) {}
   }
 
   String _generarCodigo() {
