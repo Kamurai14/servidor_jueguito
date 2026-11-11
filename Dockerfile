@@ -12,8 +12,8 @@ RUN dart compile exe bin/server.dart -o bin/server
 # Construye la imagen final con Debian
 FROM debian:bookworm-slim
 
-# ESTO ES VITAL: Instalamos la librería de SQLite3 en la máquina de Render
-RUN apt-get update && apt-get install -y libsqlite3-0 && rm -rf /var/lib/apt/lists/*
+# EL FIX: Instalamos sqlite3 y su versión de desarrollo (libsqlite3-dev)
+RUN apt-get update && apt-get install -y sqlite3 libsqlite3-dev && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=build /app/bin/server /app/bin/
