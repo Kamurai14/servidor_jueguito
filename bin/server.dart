@@ -164,7 +164,7 @@ void main(List<String> args) async {
     }
   });
 
-  // ==========================================
+ // ==========================================
   // 4. ENDPOINT MULTIJUGADOR (WEBSOCKETS)
   // ==========================================
   router.get('/ws', (Request request) async {
@@ -176,17 +176,16 @@ void main(List<String> args) async {
 
     String usuarioJugador;
     try {
-      // Usamos el JWT para garantizar que nadie pueda entrar al socket sin autenticarse
       final jwt = JWT.verify(token, SecretKey(secretoJWT));
       usuarioJugador = jwt.payload['nombre'];
     } catch (e) {
       return Response.forbidden(jsonEncode({'error': 'Token inválido o expirado'}));
     }
 
-    // Elevamos la conexión HTTP a un túnel de WebSockets
+    // EL FIX: Agregamos el "pingInterval" para que detecte las desconexiones fantasma
     final handler = webSocketHandler((webSocket, _) {
       gestorSalas.manejarConexion(webSocket, usuarioJugador);
-    });
+    }, pingInterval: const Duration(seconds: 5)); // <--- ¡AQUÍ ESTÁ LA MAGIA!
 
     return await handler(request);
   });
