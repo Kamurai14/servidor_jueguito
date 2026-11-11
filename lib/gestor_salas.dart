@@ -1,34 +1,32 @@
+import 'dart:async'; // EL FIX: Necesario para el Timer de 20 segundos
 import 'dart:convert';
 import 'dart:math';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 class Jugador {
   final String usuario;
-  final WebSocketChannel canal;
+  WebSocketChannel canal; // EL FIX: Le quitamos el 'final' para poder conectarle un cable nuevo si se reconecta
   String? codigoSala;
+  bool seRindio = false; // EL FIX: Bandera para diferenciar rendición de caída de red
 
   Jugador(this.usuario, this.canal);
 }
 
-// La clase Sala actúa como el Árbitro de la partida
 class Sala {
   final String codigo;
   final Jugador anfitrion;
   final List<Jugador> jugadores = [];
 
-  // ÁRBITRO: Lleva el conteo de cuántas veces se ha reclamado una zona (máximo 3)
-  // Ej: {'AM': 1, 'NA1': 3}
   final Map<String, int> zonasReclamadas = {};
-  final Set<String> jugadoresListos = {}; // Para saber quién ya puso sus 6 piezas
+  final Set<String> jugadoresListos = {}; 
   final Set<String> jugadoresTerminaronTurno = {};
   bool enJuego = false;
-  
-  // La sala recuerda su mapa
   String mapa; 
-  // Para llevar el historial de empates -> Ejemplo: 'AM': [5, 8]
   final Map<String, List<int>> turnosZonasReclamadas = {};
 
-  // Constructor para aceptar el mapa (por defecto mapa1)
+  // EL FIX: Aquí guardaremos las "bombas de tiempo" de 20 segundos de cada jugador
+  final Map<String, Timer> timersDesconexion = {}; 
+
   Sala(this.codigo, this.anfitrion, {this.mapa = 'mapa1'}) {
     jugadores.add(anfitrion);
   }
@@ -39,43 +37,78 @@ class Sala {
 }
 
 class GestorSalas {
-  // Guardamos objetos Sala completos
   final Map<String, Sala> _salas = {};
   final Map<WebSocketChannel, Jugador> _conexionesActivas = {};
 
   void manejarConexion(WebSocketChannel canal, String usuario) {
-    final jugador = Jugador(usuario, canal);
-    _conexionesActivas[canal] = jugador;
+    // =======================================================
+    // EL FIX: DETECTOR DE RECONEXIONES AUTOMÁTICAS
+    // =======================================================
+    Sala? salaRecuperada;
+    Jugador? jugadorPerdido;
 
-    canal.stream.listen(
-      (mensaje) {
+    for (var sala in _salas.values) {
+      if (sala.enJuego) {
         try {
-          final datos = jsonDecode(mensaje);
-          _procesarMensaje(jugador, datos);
-        } catch (e) {
-          print('Mensaje malformado ignorado: $mensaje');
-        }
-      },
-      onDone: () => _manejarDesconexion(jugador),
-      onError: (error) => _manejarDesconexion(jugador),
-    );
+          jugadorPerdido = sala.jugadores.firstWhere((j) => j.usuario == usuario);
+          salaRecuperada = sala;
+          break;
+        } catch (_) {}
+      }
+    }
+
+    if (salaRecuperada != null && jugadorPerdido != null) {
+      print('♻️ $usuario se está reconectando a la partida...');
+      
+      // 1. Le conectamos el cable de red nuevo al jugador viejo
+      jugadorPerdido.canal = canal;
+      _conexionesActivas[canal] = jugadorPerdido;
+
+      // 2. Desactivamos la bomba de tiempo de 20 segundos
+      salaRecuperada.timersDesconexion[usuario]?.cancel();
+      salaRecuperada.timersDesconexion.remove(usuario);
+
+      // 3. Lo metemos directamente al tablero saltándose el lobby
+      _enviar(canal, {
+        'tipo': 'partida_lista',
+        'mapa': salaRecuperada.mapa
+      });
+
+      // 4. Le avisamos al rival que ya regresó
+      _notificarRival(jugadorPerdido, {
+        'tipo': 'lobby_actualizado', // Reutilizamos este evento para mostrar el mensaje amarillo
+        'mensaje': '¡Tu rival se ha reconectado a la partida!',
+        'jugadores': salaRecuperada.obtenerNombresJugadores()
+      });
+      
+    } else {
+      // Conexión normal por primera vez
+      final jugador = Jugador(usuario, canal);
+      _conexionesActivas[canal] = jugador;
+
+      canal.stream.listen(
+        (mensaje) {
+          try {
+            final datos = jsonDecode(mensaje);
+            _procesarMensaje(jugador, datos);
+          } catch (e) {
+            print('Mensaje malformado ignorado: $mensaje');
+          }
+        },
+        onDone: () => _manejarDesconexion(jugador),
+        onError: (error) => _manejarDesconexion(jugador),
+      );
+    }
   }
 
   void _procesarMensaje(Jugador jugador, Map<String, dynamic> datos) {
     final accion = datos['accion'];
 
     switch (accion) {
-      // ----------------------------------------------------
-      // 1. GESTIÓN DEL LOBBY (Hasta 6 jugadores)
-      // ----------------------------------------------------
       case 'crear_sala':
         String codigo = _generarCodigo();
         jugador.codigoSala = codigo;
-        
-        // LEEMOS EL MAPA QUE ELIGIÓ EL ANFITRIÓN (si no manda nada, ponemos mapa1)
         final mapaElegido = datos['mapa'] ?? 'mapa1';
-        
-        // CREAMOS LA SALA PASÁNDOLE EL MAPA
         final nuevaSala = Sala(codigo, jugador, mapa: mapaElegido);
         _salas[codigo] = nuevaSala;
 
@@ -99,8 +132,6 @@ class GestorSalas {
           } else {
             jugador.codigoSala = codigo;
             sala.jugadores.add(jugador);
-            
-            // Le confirmamos al que acaba de entrar
             _enviar(jugador.canal, {
               'tipo': 'unido_exitosamente',
               'codigo': codigo,
@@ -108,8 +139,6 @@ class GestorSalas {
               'anfitrion': sala.anfitrion.usuario,
               'jugadores': sala.obtenerNombresJugadores(),
             });
-
-            // Le avisamos a TODOS los demás que la lista de espera se actualizó
             _notificarSala(sala, {
               'tipo': 'lobby_actualizado',
               'jugadores': sala.obtenerNombresJugadores()
@@ -132,28 +161,18 @@ class GestorSalas {
         }
         break;
 
-      // ----------------------------------------------------
-      // 2. LÓGICA DE JUEGO (Carrera por las Zonas)
-      // ----------------------------------------------------
       case 'reclamar_zona':
         final sala = _salas[jugador.codigoSala];
         if (sala != null && sala.enJuego) {
           final idZona = datos['idZona'];
           final turno = datos['turno']; 
-
-          if (!sala.turnosZonasReclamadas.containsKey(idZona)) {
-            sala.turnosZonasReclamadas[idZona] = [];
-          }
-          
+          if (!sala.turnosZonasReclamadas.containsKey(idZona)) sala.turnosZonasReclamadas[idZona] = [];
           final turnosDeEstaZona = sala.turnosZonasReclamadas[idZona]!;
-          
           if (!turnosDeEstaZona.contains(turno)) {
             turnosDeEstaZona.add(turno);
             turnosDeEstaZona.sort(); 
           }
-          
           final lugar = turnosDeEstaZona.indexOf(turno) + 1;
-
           _notificarSala(sala, {
             'tipo': 'zona_reclamada',
             'idZona': idZona,
@@ -178,14 +197,7 @@ class GestorSalas {
       case 'tirar_dados':
         final sala = _salas[jugador.codigoSala];
         if (sala != null && sala.anfitrion == jugador) {
-          final d1 = Random().nextInt(6) + 1;
-          final d2 = Random().nextInt(6) + 1;
-          
-          _notificarSala(sala, {
-            'tipo': 'nuevos_dados',
-            'dado1': d1,
-            'dado2': d2
-          });
+          _notificarSala(sala, {'tipo': 'nuevos_dados', 'dado1': Random().nextInt(6) + 1, 'dado2': Random().nextInt(6) + 1});
         }
         break;
 
@@ -193,18 +205,9 @@ class GestorSalas {
         final sala = _salas[jugador.codigoSala];
         if (sala != null && sala.enJuego) {
           sala.jugadoresTerminaronTurno.add(jugador.usuario);
-          
           if (sala.jugadoresTerminaronTurno.length >= sala.jugadores.length) {
             sala.jugadoresTerminaronTurno.clear(); 
-            
-            final d1 = Random().nextInt(6) + 1;
-            final d2 = Random().nextInt(6) + 1;
-            
-            _notificarSala(sala, {
-              'tipo': 'nuevos_dados',
-              'dado1': d1,
-              'dado2': d2
-            });
+            _notificarSala(sala, {'tipo': 'nuevos_dados', 'dado1': Random().nextInt(6) + 1, 'dado2': Random().nextInt(6) + 1});
           }
         }
         break;
@@ -216,24 +219,18 @@ class GestorSalas {
       case 'declarar_victoria':
         final sala = _salas[jugador.codigoSala];
         if (sala != null && sala.enJuego) {
-          _notificarSala(sala, {
-            'tipo': 'fin_de_partida',
-            'ganador': jugador.usuario,
-            'puntuacion': datos['puntuacion']
-          });
+          _notificarSala(sala, {'tipo': 'fin_de_partida', 'ganador': jugador.usuario, 'puntuacion': datos['puntuacion']});
           _salas.remove(sala.codigo); 
         }
         break;
 
       case 'rendirse':
+        jugador.seRindio = true; // EL FIX: Prendemos la bandera de rendición antes de matarlo
         _manejarDesconexion(jugador);
         break;
     }
   }
 
-  // =======================================================
-  // PARAMÉDICO DE RED: MANEJO DE DESCONEXIONES
-  // =======================================================
   void _manejarDesconexion(Jugador jugador) {
     _conexionesActivas.remove(jugador.canal);
     
@@ -241,46 +238,45 @@ class GestorSalas {
       final sala = _salas[jugador.codigoSala];
       if (sala != null) {
         
-        // EL FIX: Primero eliminamos físicamente al jugador de la sala ANTES de hacer cálculos
-        sala.jugadores.remove(jugador);
-
         if (sala.enJuego) {
-          // EL JUEGO YA EMPEZÓ
-          // Si el que se fue era el anfitrión, o si ya solo queda 1 jugador vivo (o ninguno)
-          if (sala.anfitrion == jugador || sala.jugadores.length < 2) {
-            
+          // =======================================================
+          // EL FIX: ¿RENDICIÓN O CAÍDA DE INTERNET?
+          // =======================================================
+          if (jugador.seRindio) {
+            // SE RINDIÓ: Lo matamos de inmediato y le damos la victoria al otro
+            sala.jugadores.remove(jugador);
             _notificarSala(sala, {
               'tipo': 'victoria_por_abandono',
               'mensaje': sala.anfitrion == jugador 
-                  ? 'El anfitrión huyó cobardemente. ¡Victoria para los sobrevivientes!' 
-                  : 'Todos tus rivales han huido. ¡Has ganado por abandono!'
+                  ? 'El anfitrión se ha rendido. ¡Victoria por abandono!' 
+                  : 'Tu rival ha huido. ¡Has ganado por abandono!'
             });
             _salas.remove(jugador.codigoSala);
-            
           } else {
-            // Si huye un invitado pero la partida era de 3 a 6 jugadores, el juego sigue
-            sala.jugadoresListos.remove(jugador.usuario);
-            sala.jugadoresTerminaronTurno.remove(jugador.usuario);
-
-            _notificarSala(sala, {
-              'tipo': 'jugador_abandono',
-              'usuario': jugador.usuario,
-              'jugadores': sala.obtenerNombresJugadores(),
-              'total': sala.jugadores.length,
+            // CAÍDA DE INTERNET: Le damos 20 segundos de gracia
+            print('⚠️ ${jugador.usuario} perdió conexión. Iniciando timer de 20s...');
+            
+            _notificarRival(jugador, {
+              'tipo': 'lobby_actualizado',
+              'mensaje': 'Tu rival se desconectó. Démosle 20 segundos para regresar...',
+              'jugadores': sala.obtenerNombresJugadores()
             });
 
-            // Rescate de turno atascado por si estábamos esperando a que el que huyó pasara turno
-            if (sala.jugadoresTerminaronTurno.length >= sala.jugadores.length) {
-              sala.jugadoresTerminaronTurno.clear();
+            // Armamos la bomba de tiempo
+            sala.timersDesconexion[jugador.usuario] = Timer(const Duration(seconds: 20), () {
+              // Si pasan 20 segundos y esta función se ejecuta, significa que no regresó
+              print('☠️ Se agotó el tiempo para ${jugador.usuario}. Declarando forfeit.');
+              sala.jugadores.remove(jugador);
               _notificarSala(sala, {
-                'tipo': 'nuevos_dados',
-                'dado1': Random().nextInt(6) + 1,
-                'dado2': Random().nextInt(6) + 1
+                'tipo': 'victoria_por_abandono',
+                'mensaje': 'Tu rival perdió la conexión a internet. ¡Has ganado por abandono!'
               });
-            }
+              _salas.remove(jugador.codigoSala);
+            });
           }
         } else {
           // ESTABAN EN EL LOBBY
+          sala.jugadores.remove(jugador);
           if (sala.anfitrion == jugador) {
             _notificarSala(sala, {'tipo': 'sala_cerrada', 'razon': 'El anfitrión cerró la sala.'});
             _salas.remove(jugador.codigoSala);
@@ -299,37 +295,28 @@ class GestorSalas {
     }
   }
 
-  // Envía un mensaje a TODOS en la sala (incluyendo al que detonó la acción)
   void _notificarSala(Sala sala, Map<String, dynamic> mensaje) {
     final payload = jsonEncode(mensaje);
     for (var j in sala.jugadores) {
-      try {
-        j.canal.sink.add(payload);
-      } catch (_) {} // ESCUDO: Si el celular está apagado, lo ignora y el servidor no crashea
+      try { j.canal.sink.add(payload); } catch (_) {} 
     }
   }
 
-  // Envía un mensaje a todos MENOS al que originó la acción
   void _notificarRival(Jugador jugador, Map<String, dynamic> mensaje) {
     if (jugador.codigoSala == null) return;
-    
     final sala = _salas[jugador.codigoSala];
     if (sala != null) {
       final payload = jsonEncode(mensaje);
       for (var rival in sala.jugadores) {
         if (rival.usuario != jugador.usuario) {
-          try {
-            rival.canal.sink.add(payload);
-          } catch (_) {}
+          try { rival.canal.sink.add(payload); } catch (_) {}
         }
       }
     }
   }
 
   void _enviar(WebSocketChannel canal, Map<String, dynamic> mensaje) {
-    try {
-      canal.sink.add(jsonEncode(mensaje));
-    } catch (_) {}
+    try { canal.sink.add(jsonEncode(mensaje)); } catch (_) {}
   }
 
   String _generarCodigo() {
