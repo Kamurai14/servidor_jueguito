@@ -56,11 +56,12 @@ class BaseDatos {
     return null; // Contraseña incorrecta o usuario no encontrado
   }
 
-  // Elimina un usuario de la base de datos a partir de su nombre
-  bool borrarUsuario(String usuario) {
+  // EL FIX: Recibimos el ID (int) en lugar del nombre (String)
+  bool borrarUsuario(int idUsuario) {
     try {
-      final stmt = _db.prepare('DELETE FROM usuarios WHERE usuario = ?');
-      stmt.execute([usuario]);
+      // Borramos usando la columna 'id'
+      final stmt = _db.prepare('DELETE FROM usuarios WHERE id = ?');
+      stmt.execute([idUsuario]);
       stmt.dispose();
       return true;
     } catch (e) {
