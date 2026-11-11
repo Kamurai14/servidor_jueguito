@@ -241,10 +241,14 @@ class GestorSalas {
       final sala = _salas[jugador.codigoSala];
       if (sala != null) {
         
+        // EL FIX: Primero eliminamos físicamente al jugador de la sala ANTES de hacer cálculos
+        sala.jugadores.remove(jugador);
+
         if (sala.enJuego) {
           // EL JUEGO YA EMPEZÓ
-          if (sala.anfitrion == jugador || sala.jugadores.length == 1) {
-            // Si el anfitrión huye o si solo queda 1 jugador vivo en la sala -> Victoria por abandono
+          // Si el que se fue era el anfitrión, o si ya solo queda 1 jugador vivo (o ninguno)
+          if (sala.anfitrion == jugador || sala.jugadores.length < 2) {
+            
             _notificarSala(sala, {
               'tipo': 'victoria_por_abandono',
               'mensaje': sala.anfitrion == jugador 
@@ -252,8 +256,9 @@ class GestorSalas {
                   : 'Todos tus rivales han huido. ¡Has ganado por abandono!'
             });
             _salas.remove(jugador.codigoSala);
+            
           } else {
-            // Si huye un invitado pero quedan varios, el juego sigue
+            // Si huye un invitado pero la partida era de 3 a 6 jugadores, el juego sigue
             sala.jugadoresListos.remove(jugador.usuario);
             sala.jugadoresTerminaronTurno.remove(jugador.usuario);
 
@@ -264,7 +269,7 @@ class GestorSalas {
               'total': sala.jugadores.length,
             });
 
-            // Rescate de turno atascado
+            // Rescate de turno atascado por si estábamos esperando a que el que huyó pasara turno
             if (sala.jugadoresTerminaronTurno.length >= sala.jugadores.length) {
               sala.jugadoresTerminaronTurno.clear();
               _notificarSala(sala, {
@@ -280,7 +285,6 @@ class GestorSalas {
             _notificarSala(sala, {'tipo': 'sala_cerrada', 'razon': 'El anfitrión cerró la sala.'});
             _salas.remove(jugador.codigoSala);
           } else {
-            sala.jugadores.remove(jugador);
             if (sala.jugadores.isEmpty) {
               _salas.remove(jugador.codigoSala);
             } else {
