@@ -169,23 +169,33 @@ void main(List<String> args) async {
   // ==========================================
   router.get('/ws', (Request request) async {
     final token = request.url.queryParameters['token'];
-
-    if (token == null) {
-      return Response.forbidden(jsonEncode({'error': 'Token no proporcionado'}));
-    }
+    final invitado = request.url.queryParameters['invitado'];
 
     String usuarioJugador;
-    try {
-      final jwt = JWT.verify(token, SecretKey(secretoJWT));
-      usuarioJugador = jwt.payload['nombre'];
-    } catch (e) {
-      return Response.forbidden(jsonEncode({'error': 'Token inválido o expirado'}));
+
+    // Si trae token, validamos que sea un usuario registrado
+    if (token != null) {
+      try {
+        final jwt = JWT.verify(token, SecretKey(secretoJWT));
+        usuarioJugador = jwt.payload['nombre'];
+      } catch (e) {
+        return Response.forbidden(
+          jsonEncode({'error': 'Token inválido o expirado'}),
+        );
+      }
+    }
+    // Si no trae token pero trae el pase de invitado, lo dejamos entrar
+    else if (invitado != null && invitado.startsWith('Anonimo')) {
+      usuarioJugador = invitado;
+    }
+    // Si no trae ninguno de los dos, lo pateamos
+    else {
+      return Response.forbidden(jsonEncode({'error': 'No autorizado'}));
     }
 
-    // EL FIX: Agregamos el "pingInterval" para que detecte las desconexiones fantasma
     final handler = webSocketHandler((webSocket, _) {
       gestorSalas.manejarConexion(webSocket, usuarioJugador);
-    }, pingInterval: const Duration(seconds: 5)); // <--- ¡AQUÍ ESTÁ LA MAGIA!
+    }, pingInterval: const Duration(seconds: 5));
 
     return await handler(request);
   });
