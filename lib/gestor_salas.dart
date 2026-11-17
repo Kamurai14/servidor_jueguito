@@ -5,10 +5,12 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 class Jugador {
   final String usuario;
-  WebSocketChannel canal; // EL FIX: Le quitamos el 'final' para poder conectarle un cable nuevo si se reconecta
+  WebSocketChannel canal; 
   String? codigoSala;
-  bool seRindio = false; // EL FIX: Bandera para diferenciar rendición de caída de red
-
+  bool seRindio = false; 
+  List<dynamic> tablero = []; // Almacena el estado comprimido del tablero
+  int puntuacion = 0; // Almacena la puntuación actual
+  
   Jugador(this.usuario, this.canal);
 }
 
@@ -23,8 +25,9 @@ class Sala {
   bool enJuego = false;
   String mapa; 
   final Map<String, List<int>> turnosZonasReclamadas = {};
-
-  // EL FIX: Aquí guardaremos las "bombas de tiempo" de 20 segundos de cada jugador
+  
+  // Lista para acumular quién llenó qué zona durante el turno actual
+  final List<Map<String, dynamic>> zonasReclamadasEnEsteTurno = []; 
   final Map<String, Timer> timersDesconexion = {}; 
 
   Sala(this.codigo, this.anfitrion, {this.mapa = 'mapa1'}) {
@@ -173,8 +176,9 @@ class GestorSalas {
             turnosDeEstaZona.sort(); 
           }
           final lugar = turnosDeEstaZona.indexOf(turno) + 1;
-          _notificarSala(sala, {
-            'tipo': 'zona_reclamada',
+          
+          // Se acumula en lugar de notificar de inmediato
+          sala.zonasReclamadasEnEsteTurno.add({
             'idZona': idZona,
             'lugar': lugar,
             'usuario': jugador.usuario
@@ -204,10 +208,31 @@ class GestorSalas {
       case 'terminar_turno':
         final sala = _salas[jugador.codigoSala];
         if (sala != null && sala.enJuego) {
+          jugador.tablero = datos['tablero'] ?? [];
+          jugador.puntuacion = datos['puntuacion'] ?? 0;
           sala.jugadoresTerminaronTurno.add(jugador.usuario);
+
           if (sala.jugadoresTerminaronTurno.length >= sala.jugadores.length) {
             sala.jugadoresTerminaronTurno.clear(); 
-            _notificarSala(sala, {'tipo': 'nuevos_dados', 'dado1': Random().nextInt(6) + 1, 'dado2': Random().nextInt(6) + 1});
+            
+            Map<String, dynamic> tableros = {};
+            Map<String, int> puntuaciones = {};
+            for(var j in sala.jugadores) {
+              tableros[j.usuario] = j.tablero;
+              puntuaciones[j.usuario] = j.puntuacion;
+            }
+
+            // Notificación global agrupada
+            _notificarSala(sala, {
+              'tipo': 'resumen_turno',
+              'dado1': Random().nextInt(6) + 1,
+              'dado2': Random().nextInt(6) + 1,
+              'tableros': tableros,
+              'puntuaciones': puntuaciones,
+              'avisos_zonas': sala.zonasReclamadasEnEsteTurno
+            });
+            
+            sala.zonasReclamadasEnEsteTurno.clear();
           }
         }
         break;
@@ -219,7 +244,19 @@ class GestorSalas {
       case 'declarar_victoria':
         final sala = _salas[jugador.codigoSala];
         if (sala != null && sala.enJuego) {
-          _notificarSala(sala, {'tipo': 'fin_de_partida', 'ganador': jugador.usuario, 'puntuacion': datos['puntuacion']});
+          // Recopilamos el ranking y los tableros finales
+          List<Map<String, dynamic>> ranking = sala.jugadores.map((j) => {
+            'usuario': j.usuario,
+            'puntuacion': j.puntuacion,
+            'tablero': j.tablero
+          }).toList();
+          
+          ranking.sort((a, b) => (b['puntuacion'] as int).compareTo(a['puntuacion'] as int));
+
+          _notificarSala(sala, {
+            'tipo': 'fin_de_partida', 
+            'ranking': ranking
+          });
           _salas.remove(sala.codigo); 
         }
         break;
