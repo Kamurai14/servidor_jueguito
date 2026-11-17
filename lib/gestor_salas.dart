@@ -1,15 +1,15 @@
-import 'dart:async'; // EL FIX: Necesario para el Timer de 20 segundos
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 class Jugador {
   final String usuario;
-  WebSocketChannel canal; 
+  WebSocketChannel canal;
   String? codigoSala;
-  bool seRindio = false; 
-  List<dynamic> tablero = []; // Almacena el estado comprimido del tablero
-  int puntuacion = 0; // Almacena la puntuación actual
+  bool seRindio = false;
+  List<dynamic> tablero = []; 
+  int puntuacion = 0;
   
   Jugador(this.usuario, this.canal);
 }
@@ -20,13 +20,15 @@ class Sala {
   final List<Jugador> jugadores = [];
 
   final Map<String, int> zonasReclamadas = {};
-  final Set<String> jugadoresListos = {}; 
-  final Set<String> jugadoresTerminaronTurno = {};
+  
+  // Usamos el objeto Jugador para identificar conexiones reales, no nombres
+  final Set<Jugador> jugadoresListos = {}; 
+  final Set<Jugador> jugadoresTerminaronTurno = {};
+  
   bool enJuego = false;
   String mapa; 
   final Map<String, List<int>> turnosZonasReclamadas = {};
   
-  // Lista para acumular quién llenó qué zona durante el turno actual
   final List<Map<String, dynamic>> zonasReclamadasEnEsteTurno = []; 
   final Map<String, Timer> timersDesconexion = {}; 
 
@@ -44,9 +46,6 @@ class GestorSalas {
   final Map<WebSocketChannel, Jugador> _conexionesActivas = {};
 
   void manejarConexion(WebSocketChannel canal, String usuario) {
-    // =======================================================
-    // EL FIX: DETECTOR DE RECONEXIONES AUTOMÁTICAS
-    // =======================================================
     Sala? salaRecuperada;
     Jugador? jugadorPerdido;
 
@@ -61,31 +60,24 @@ class GestorSalas {
     }
 
     if (salaRecuperada != null && jugadorPerdido != null) {
-      print('♻️ $usuario se está reconectando a la partida...');
-      
-      // 1. Le conectamos el cable de red nuevo al jugador viejo
       jugadorPerdido.canal = canal;
       _conexionesActivas[canal] = jugadorPerdido;
 
-      // 2. Desactivamos la bomba de tiempo de 20 segundos
       salaRecuperada.timersDesconexion[usuario]?.cancel();
       salaRecuperada.timersDesconexion.remove(usuario);
 
-      // 3. Lo metemos directamente al tablero saltándose el lobby
       _enviar(canal, {
         'tipo': 'partida_lista',
         'mapa': salaRecuperada.mapa
       });
 
-      // 4. Le avisamos al rival que ya regresó
       _notificarRival(jugadorPerdido, {
-        'tipo': 'lobby_actualizado', // Reutilizamos este evento para mostrar el mensaje amarillo
-        'mensaje': '¡Tu rival se ha reconectado a la partida!',
+        'tipo': 'lobby_actualizado',
+        'mensaje': 'Tu rival se ha reconectado a la partida',
         'jugadores': salaRecuperada.obtenerNombresJugadores()
       });
       
     } else {
-      // Conexión normal por primera vez
       final jugador = Jugador(usuario, canal);
       _conexionesActivas[canal] = jugador;
 
@@ -177,7 +169,6 @@ class GestorSalas {
           }
           final lugar = turnosDeEstaZona.indexOf(turno) + 1;
           
-          // Se acumula en lugar de notificar de inmediato
           sala.zonasReclamadasEnEsteTurno.add({
             'idZona': idZona,
             'lugar': lugar,
@@ -189,7 +180,7 @@ class GestorSalas {
       case 'listo_para_jugar':
         final sala = _salas[jugador.codigoSala];
         if (sala != null) {
-          sala.jugadoresListos.add(jugador.usuario);
+          sala.jugadoresListos.add(jugador);
           _notificarSala(sala, {
             'tipo': 'actualizacion_listos',
             'listos': sala.jugadoresListos.length,
@@ -210,7 +201,8 @@ class GestorSalas {
         if (sala != null && sala.enJuego) {
           jugador.tablero = datos['tablero'] ?? [];
           jugador.puntuacion = datos['puntuacion'] ?? 0;
-          sala.jugadoresTerminaronTurno.add(jugador.usuario);
+          
+          sala.jugadoresTerminaronTurno.add(jugador);
 
           if (sala.jugadoresTerminaronTurno.length >= sala.jugadores.length) {
             sala.jugadoresTerminaronTurno.clear(); 
@@ -222,7 +214,6 @@ class GestorSalas {
               puntuaciones[j.usuario] = j.puntuacion;
             }
 
-            // Notificación global agrupada
             _notificarSala(sala, {
               'tipo': 'resumen_turno',
               'dado1': Random().nextInt(6) + 1,
@@ -244,7 +235,6 @@ class GestorSalas {
       case 'declarar_victoria':
         final sala = _salas[jugador.codigoSala];
         if (sala != null && sala.enJuego) {
-          // Recopilamos el ranking y los tableros finales
           List<Map<String, dynamic>> ranking = sala.jugadores.map((j) => {
             'usuario': j.usuario,
             'puntuacion': j.puntuacion,
@@ -262,7 +252,7 @@ class GestorSalas {
         break;
 
       case 'rendirse':
-        jugador.seRindio = true; // EL FIX: Prendemos la bandera de rendición antes de matarlo
+        jugador.seRindio = true; 
         _manejarDesconexion(jugador);
         break;
     }
@@ -274,46 +264,43 @@ class GestorSalas {
     if (jugador.codigoSala != null) {
       final sala = _salas[jugador.codigoSala];
       if (sala != null) {
-        
         if (sala.enJuego) {
-          // =======================================================
-          // EL FIX: ¿RENDICIÓN O CAÍDA DE INTERNET?
-          // =======================================================
           if (jugador.seRindio) {
-            // SE RINDIÓ: Lo matamos de inmediato y le damos la victoria al otro
             sala.jugadores.remove(jugador);
+            sala.jugadoresListos.remove(jugador);
+            sala.jugadoresTerminaronTurno.remove(jugador);
+            
             _notificarSala(sala, {
               'tipo': 'victoria_por_abandono',
               'mensaje': sala.anfitrion == jugador 
-                  ? 'El anfitrión se ha rendido. ¡Victoria por abandono!' 
-                  : 'Tu rival ha huido. ¡Has ganado por abandono!'
+                  ? 'El anfitrión se ha rendido. Victoria por abandono' 
+                  : 'Tu rival ha huido. Has ganado por abandono'
             });
             _salas.remove(jugador.codigoSala);
           } else {
-            // CAÍDA DE INTERNET: Le damos 20 segundos de gracia
-            print('⚠️ ${jugador.usuario} perdió conexión. Iniciando timer de 20s...');
-            
             _notificarRival(jugador, {
               'tipo': 'lobby_actualizado',
               'mensaje': 'Tu rival se desconectó. Démosle 20 segundos para regresar...',
               'jugadores': sala.obtenerNombresJugadores()
             });
 
-            // Armamos la bomba de tiempo
             sala.timersDesconexion[jugador.usuario] = Timer(const Duration(seconds: 20), () {
-              // Si pasan 20 segundos y esta función se ejecuta, significa que no regresó
-              print('☠️ Se agotó el tiempo para ${jugador.usuario}. Declarando forfeit.');
               sala.jugadores.remove(jugador);
+              sala.jugadoresListos.remove(jugador);
+              sala.jugadoresTerminaronTurno.remove(jugador);
+              
               _notificarSala(sala, {
                 'tipo': 'victoria_por_abandono',
-                'mensaje': 'Tu rival perdió la conexión a internet. ¡Has ganado por abandono!'
+                'mensaje': 'Tu rival perdió la conexión a internet. Has ganado por abandono'
               });
               _salas.remove(jugador.codigoSala);
             });
           }
         } else {
-          // ESTABAN EN EL LOBBY
           sala.jugadores.remove(jugador);
+          sala.jugadoresListos.remove(jugador);
+          sala.jugadoresTerminaronTurno.remove(jugador);
+          
           if (sala.anfitrion == jugador) {
             _notificarSala(sala, {'tipo': 'sala_cerrada', 'razon': 'El anfitrión cerró la sala.'});
             _salas.remove(jugador.codigoSala);
